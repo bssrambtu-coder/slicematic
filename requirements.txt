@@ -1,0 +1,5 @@
+# SliceMatic Stage 2 (Gradio MVP) — runtime + test deps.
+# Pin loosely; core logic uses only the stdlib (decimal), so the app/tests run
+# on any recent Python 3.11+.
+gradio>=4.0,<5.0
+pytest>=8.0
