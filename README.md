@@ -1,3 +1,14 @@
+---
+title: SliceMatic
+emoji: 🍕
+colorFrom: red
+colorTo: yellow
+sdk: gradio
+sdk_version: 6.19.0
+app_file: app.py
+pinned: false
+---
+
 # SliceMatic 🍕
 
 A digital pizza-ordering MVP for a single outlet in New Ashok Nagar, East Delhi.

@@ -15,6 +15,7 @@ from __future__ import annotations
 import html
 import sys
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -50,7 +51,7 @@ def fresh_state() -> dict:
         "qty": None,
         "base_id": None,
         "pizza_id": None,
-        "topping_id": None,
+        "topping_ids": [],
         "payment_mode": None,
         "bill": None,
         "confirmation_html": "",
@@ -73,8 +74,10 @@ def _item_by_id(category: str, item_id: Optional[str]) -> Optional[menu.MenuItem
 def _radio_choices_for(category: str):
     """Build (choices, label_to_id, sold_out_names) from live quota state.
 
-    Sold-out items are excluded from `choices` entirely — Gradio's Radio has
-    no per-option disabled flag, so the only faithful way to make a sold-out
+    Used for base/pizza (gr.Radio, single pick) and toppings (gr.CheckboxGroup,
+    multi pick) alike — both widgets take the same flat choices list. Sold-out
+    items are excluded from `choices` entirely: neither widget has a
+    per-option disabled flag, so the only faithful way to make a sold-out
     item "non-selectable" is to not offer it as a choice. They're still shown
     to the customer via a separate greyed-out note (sold_out_names).
     """
@@ -101,6 +104,12 @@ def _id_to_label(item_id: Optional[str], label_to_id: Dict[str, str]) -> Optiona
     return None
 
 
+def _ids_to_labels(item_ids: List[str], label_to_id: Dict[str, str]) -> List[str]:
+    """Inverse of _id_to_label, for restoring a CheckboxGroup's selection."""
+    id_to_label = {iid: label for label, iid in label_to_id.items()}
+    return [id_to_label[i] for i in item_ids if i in id_to_label]
+
+
 def _sold_out_markdown(names: List[str]) -> str:
     if not names:
         return ""
@@ -111,16 +120,25 @@ def _sold_out_markdown(names: List[str]) -> str:
 def _bill_html(state: dict) -> str:
     base_item = _item_by_id("base", state["base_id"])
     pizza_item = _item_by_id("pizza", state["pizza_id"])
-    topping_item = _item_by_id("topping", state["topping_id"])
+    topping_items = [_item_by_id("topping", tid) for tid in state.get("topping_ids", [])]
     bill: core.Bill = state["bill"]
-    if not (base_item and pizza_item and topping_item and bill):
+    if not (base_item and pizza_item and topping_items and bill):
         return ""
+
+    topping_rows = "".join(
+        f"<tr><td>{html.escape(t.name)}</td><td style='text-align:right;'>{core.format_money(t.price)}</td></tr>"
+        for t in topping_items
+    )
 
     discount_row = ""
     if bill.discount > 0:
+        # Explicit text color (not just background) — without it, this row
+        # inherits Gradio's theme default text color, which can be white and
+        # invisible against a light highlight background in dark mode.
         discount_row = (
-            "<tr style='background:#fff3cd;'><td>Discount</td>"
-            f"<td style='text-align:right;'>-{core.format_money(bill.discount)}</td></tr>"
+            "<tr style='background:#d4edda;color:#155724;'>"
+            "<td style='color:#155724;'>Discount</td>"
+            f"<td style='text-align:right;color:#155724;'>-{core.format_money(bill.discount)}</td></tr>"
         )
 
     return f"""
@@ -129,7 +147,7 @@ def _bill_html(state: dict) -> str:
       <table style="width:100%;border-collapse:collapse;">
         <tr><td>{html.escape(base_item.name)}</td><td style="text-align:right;">{core.format_money(base_item.price)}</td></tr>
         <tr><td>{html.escape(pizza_item.name)}</td><td style="text-align:right;">{core.format_money(pizza_item.price)}</td></tr>
-        <tr><td>{html.escape(topping_item.name)}</td><td style="text-align:right;">{core.format_money(topping_item.price)}</td></tr>
+        {topping_rows}
         <tr><td>Unit price</td><td style="text-align:right;">{core.format_money(bill.unit_price)}</td></tr>
         <tr><td>Subtotal &times; {bill.quantity}</td><td style="text-align:right;">{core.format_money(bill.subtotal)}</td></tr>
         {discount_row}
@@ -211,7 +229,7 @@ def render(state: dict, error: Optional[str] = None) -> list:
         gr.update(value=_sold_out_markdown(base_sold_out)),
         gr.update(choices=pizza_choices, value=_id_to_label(state.get("pizza_id"), pizza_label_to_id)),
         gr.update(value=_sold_out_markdown(pizza_sold_out)),
-        gr.update(choices=topping_choices, value=_id_to_label(state.get("topping_id"), topping_label_to_id)),
+        gr.update(choices=topping_choices, value=_ids_to_labels(state.get("topping_ids", []), topping_label_to_id)),
         gr.update(value=_sold_out_markdown(topping_sold_out)),
         gr.update(value=state.get("payment_mode")),
         gr.update(value=bill_html_value),
@@ -276,19 +294,22 @@ def submit_pizza(state: dict, radio_value: Optional[str]):
     return [state, *render(state)]
 
 
-def submit_topping(state: dict, radio_value: Optional[str]):
+def submit_topping(state: dict, selected_labels: Optional[List[str]]):
     _, label_to_id, _sold_out = _radio_choices_for("topping")
-    item_id = label_to_id.get(radio_value) if radio_value else None
-    if item_id is None:
-        return [state, *render(state, error="Choose a topping from the list.")]
-    if not _QUOTA.is_available(item_id):
-        return [state, *render(state, error="That topping just sold out — please choose another.")]
-    state["topping_id"] = item_id
+    selected_labels = selected_labels or []
+    topping_ids = [label_to_id[v] for v in selected_labels if v in label_to_id]
 
+    res = core.validate_toppings_selection(topping_ids)
+    if not res.ok:
+        return [state, *render(state, error=res.message)]
+    if any(not _QUOTA.is_available(tid) for tid in topping_ids):
+        return [state, *render(state, error="One of those toppings just sold out — please reselect.")]
+
+    state["topping_ids"] = topping_ids
     base_item = _item_by_id("base", state["base_id"])
     pizza_item = _item_by_id("pizza", state["pizza_id"])
-    topping_item = _item_by_id("topping", item_id)
-    state["bill"] = core.price_order(base_item.price, pizza_item.price, topping_item.price, state["qty"])
+    topping_prices = [_item_by_id("topping", tid).price for tid in topping_ids]
+    state["bill"] = core.price_order(base_item.price, pizza_item.price, topping_prices, state["qty"])
     state["step"] = "bill"
     return [state, *render(state)]
 
@@ -306,9 +327,12 @@ def submit_payment(state: dict, choice: Optional[str]):
 
     base_item = _item_by_id("base", state["base_id"])
     pizza_item = _item_by_id("pizza", state["pizza_id"])
-    topping_item = _item_by_id("topping", state["topping_id"])
+    topping_items = [_item_by_id("topping", tid) for tid in state["topping_ids"]]
     bill: core.Bill = state["bill"]
 
+    # orders_log.txt keeps its fixed 15-column shape (Stage 3 importer depends
+    # on it) even with multiple toppings: names are joined into one field and
+    # prices summed into one field, rather than adding a variable column count.
     record = {
         "timestamp": _session_timestamp(),
         "name": state["name"],
@@ -317,8 +341,8 @@ def submit_payment(state: dict, choice: Optional[str]):
         "base_price": base_item.price,
         "pizza_name": pizza_item.name,
         "pizza_price": pizza_item.price,
-        "topping_name": topping_item.name,
-        "topping_price": topping_item.price,
+        "topping_name": "; ".join(t.name for t in topping_items),
+        "topping_price": sum((t.price for t in topping_items), start=Decimal("0")),
         "qty": bill.quantity,
         "subtotal": bill.subtotal,
         "discount": bill.discount,
@@ -355,6 +379,16 @@ def start_over(_state: dict):
 # --------------------------------------------------------------------------- #
 # UI construction.
 # --------------------------------------------------------------------------- #
+# Radio/CheckboxGroup lay their options out horizontally (flex-wrap) by
+# default. Base/Pizza/Toppings read better as one item per line, so this
+# forces a vertical stack for any widget tagged "vertical-options".
+_VERTICAL_OPTIONS_CSS = """
+.vertical-options .wrap {
+    flex-direction: column !important;
+}
+"""
+
+
 def build_ui() -> gr.Blocks:
     with gr.Blocks(title="SliceMatic") as demo:
         gr.Markdown("# 🍕 SliceMatic — Order Your Pizza")
@@ -389,7 +423,7 @@ def build_ui() -> gr.Blocks:
             with gr.Group(visible=False) as grp_base:
                 gr.Markdown("### Step 4 — Choose Your Base")
                 base_sold_out_md = gr.Markdown()
-                base_radio = gr.Radio(label="Base", choices=[])
+                base_radio = gr.Radio(label="Base", choices=[], elem_classes="vertical-options")
                 with gr.Row():
                     back_base = gr.Button("Back")
                     cancel_base = gr.Button("Start Over")
@@ -398,16 +432,16 @@ def build_ui() -> gr.Blocks:
             with gr.Group(visible=False) as grp_pizza:
                 gr.Markdown("### Step 5 — Choose Your Pizza")
                 pizza_sold_out_md = gr.Markdown()
-                pizza_radio = gr.Radio(label="Pizza", choices=[])
+                pizza_radio = gr.Radio(label="Pizza", choices=[], elem_classes="vertical-options")
                 with gr.Row():
                     back_pizza = gr.Button("Back")
                     cancel_pizza = gr.Button("Start Over")
                     next_pizza = gr.Button("Next", variant="primary")
 
             with gr.Group(visible=False) as grp_topping:
-                gr.Markdown("### Step 6 — Choose Your Topping")
+                gr.Markdown("### Step 6 — Choose Your Toppings (one or more)")
                 topping_sold_out_md = gr.Markdown()
-                topping_radio = gr.Radio(label="Topping", choices=[])
+                topping_checkboxes = gr.CheckboxGroup(label="Toppings", choices=[], elem_classes="vertical-options")
                 with gr.Row():
                     back_topping = gr.Button("Back")
                     cancel_topping = gr.Button("Start Over")
@@ -446,7 +480,7 @@ def build_ui() -> gr.Blocks:
             name_box, phone_box, qty_box,
             base_radio, base_sold_out_md,
             pizza_radio, pizza_sold_out_md,
-            topping_radio, topping_sold_out_md,
+            topping_checkboxes, topping_sold_out_md,
             payment_radio,
             bill_html_box, confirmation_html_box,
             status_md, kitchen_html_box,
@@ -471,7 +505,7 @@ def build_ui() -> gr.Blocks:
         back_pizza.click(go_back, inputs=[state], outputs=[state, *all_outputs])
         cancel_pizza.click(start_over, inputs=[state], outputs=[state, *all_outputs])
 
-        next_topping.click(submit_topping, inputs=[state, topping_radio], outputs=[state, *all_outputs])
+        next_topping.click(submit_topping, inputs=[state, topping_checkboxes], outputs=[state, *all_outputs])
         back_topping.click(go_back, inputs=[state], outputs=[state, *all_outputs])
         cancel_topping.click(start_over, inputs=[state], outputs=[state, *all_outputs])
 
@@ -514,7 +548,7 @@ def main() -> None:
     _QUOTA = quota.QuotaManager(quota_config, auto_reset=True)
 
     demo = build_ui()
-    demo.launch(theme=gr.themes.Soft(primary_hue="red"))
+    demo.launch(theme=gr.themes.Soft(primary_hue="red"), css=_VERTICAL_OPTIONS_CSS)
 
 
 if __name__ == "__main__":

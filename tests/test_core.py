@@ -178,19 +178,24 @@ class TestValidatePayment:
 class TestPricing:
     # Thin Crust 149 + Margherita 299 + Black Olives 49 = 497 unit price.
     BASE, PIZZA, TOP = 149, 299, 49
+    TOPPINGS = [TOP]
     UNIT = Decimal("497.00")
 
     def test_unit_price_is_sum_of_three(self):
-        assert core.unit_price(self.BASE, self.PIZZA, self.TOP) == self.UNIT
+        assert core.unit_price(self.BASE, self.PIZZA, self.TOPPINGS) == self.UNIT
+
+    def test_unit_price_sums_multiple_toppings(self):
+        # 149 + 299 + 49 + 69 (Extra Cheese) = 566
+        assert core.unit_price(self.BASE, self.PIZZA, [49, 69]) == Decimal("566.00")
 
     def test_all_money_is_decimal(self):
-        bill = core.price_order(self.BASE, self.PIZZA, self.TOP, qty=1)
+        bill = core.price_order(self.BASE, self.PIZZA, self.TOPPINGS, qty=1)
         for field in (bill.unit_price, bill.subtotal, bill.discount, bill.gst, bill.final_total):
             assert isinstance(field, Decimal)
 
     def test_no_discount_below_threshold(self):
         qty = core.DISCOUNT_THRESHOLD - 1
-        bill = core.price_order(self.BASE, self.PIZZA, self.TOP, qty=qty)
+        bill = core.price_order(self.BASE, self.PIZZA, self.TOPPINGS, qty=qty)
         assert bill.discount == Decimal("0.00")
         # subtotal = unit * qty; gst = 18% of subtotal; final = subtotal + gst
         expected_sub = self.UNIT * qty
@@ -200,7 +205,7 @@ class TestPricing:
 
     def test_discount_applies_at_threshold(self):
         qty = core.DISCOUNT_THRESHOLD
-        bill = core.price_order(self.BASE, self.PIZZA, self.TOP, qty=qty)
+        bill = core.price_order(self.BASE, self.PIZZA, self.TOPPINGS, qty=qty)
         expected_sub = self.UNIT * qty
         expected_disc = (expected_sub * core.DISCOUNT_RATE).quantize(Decimal("0.01"))
         assert bill.discount == expected_disc
@@ -211,14 +216,14 @@ class TestPricing:
 
     def test_gst_computed_on_post_discount_not_pre(self):
         qty = core.DISCOUNT_THRESHOLD
-        bill = core.price_order(self.BASE, self.PIZZA, self.TOP, qty=qty)
+        bill = core.price_order(self.BASE, self.PIZZA, self.TOPPINGS, qty=qty)
         pre_discount_gst = (self.UNIT * qty * core.GST_RATE).quantize(Decimal("0.01"))
         assert bill.gst < pre_discount_gst  # discount lowered the taxable base
 
     def test_worked_example_qty5(self):
         # 497 * 5 = 2485.00; disc 10% = 248.50; discounted 2236.50;
         # gst 18% = 402.57; final = 2639.07
-        bill = core.price_order(self.BASE, self.PIZZA, self.TOP, qty=5)
+        bill = core.price_order(self.BASE, self.PIZZA, self.TOPPINGS, qty=5)
         assert bill.subtotal == Decimal("2485.00")
         assert bill.discount == Decimal("248.50")
         assert bill.gst == Decimal("402.57")
@@ -232,15 +237,38 @@ class TestPricing:
 
 
 # --------------------------------------------------------------------------- #
+# Toppings selection (multi-select — at least one, multiple allowed)
+# --------------------------------------------------------------------------- #
+class TestValidateToppingsSelection:
+    def test_single_topping_accepted(self):
+        res = core.validate_toppings_selection(["T1"])
+        assert res.ok is True
+        assert res.value == ["T1"]
+
+    def test_multiple_toppings_accepted(self):
+        res = core.validate_toppings_selection(["T1", "T2", "T3"])
+        assert res.ok is True
+        assert res.value == ["T1", "T2", "T3"]
+
+    @pytest.mark.parametrize("selected", [[], None])
+    def test_empty_selection_rejected(self, selected):
+        res = core.validate_toppings_selection(selected)
+        assert res.ok is False
+        assert res.value is None
+        assert res.message
+
+
+# --------------------------------------------------------------------------- #
 # Golden bill: Cheese Burst (229) + BBQ Chicken (379) + Extra Cheese (69).
 # Independent worked example, verified to the paisa.
 # --------------------------------------------------------------------------- #
 class TestGoldenBill:
     BASE, PIZZA, TOP = 229, 379, 69
+    TOPPINGS = [TOP]
     UNIT = Decimal("677.00")
 
     def test_golden_bill_qty5_to_the_paisa(self):
-        bill = core.price_order(self.BASE, self.PIZZA, self.TOP, qty=5)
+        bill = core.price_order(self.BASE, self.PIZZA, self.TOPPINGS, qty=5)
         assert bill.unit_price == self.UNIT
         assert bill.subtotal == Decimal("3385.00")
         assert bill.discount == Decimal("338.50")
@@ -249,15 +277,25 @@ class TestGoldenBill:
         assert bill.final_total == Decimal("3594.87")
 
     def test_golden_bill_no_discount_qty4(self):
-        bill = core.price_order(self.BASE, self.PIZZA, self.TOP, qty=4)
+        bill = core.price_order(self.BASE, self.PIZZA, self.TOPPINGS, qty=4)
         assert bill.subtotal == Decimal("2708.00")
         assert bill.discount == Decimal("0.00")
         assert bill.gst == Decimal("487.44")
         assert bill.final_total == Decimal("3195.44")
 
     def test_golden_bill_boundary_qty_equals_threshold_discounts(self):
-        bill = core.price_order(self.BASE, self.PIZZA, self.TOP, qty=core.DISCOUNT_THRESHOLD)
+        bill = core.price_order(self.BASE, self.PIZZA, self.TOPPINGS, qty=core.DISCOUNT_THRESHOLD)
         assert bill.discount > Decimal("0.00")
+
+    def test_golden_bill_two_toppings_to_the_paisa(self):
+        # Same base+pizza, but TWO toppings (69 + 49 = 118) -> unit 726.
+        # qty 5: subtotal 3630.00 -> disc 363.00 -> post 3267.00 -> gst 588.06 -> total 3855.06
+        bill = core.price_order(self.BASE, self.PIZZA, [69, 49], qty=5)
+        assert bill.unit_price == Decimal("726.00")
+        assert bill.subtotal == Decimal("3630.00")
+        assert bill.discount == Decimal("363.00")
+        assert bill.gst == Decimal("588.06")
+        assert bill.final_total == Decimal("3855.06")
 
 
 # --------------------------------------------------------------------------- #

@@ -2,8 +2,9 @@
 core.py — SliceMatic pure business logic.
 
 This module is the SHARED CONTRACT for the whole project. It contains:
-  * input validators (name, phone, quantity, menu selection, payment)
+  * input validators (name, phone, quantity, menu selection, toppings, payment)
   * the pricing engine (unit price -> subtotal -> discount -> GST -> final)
+    where unit price = base + pizza + sum of one-or-more chosen toppings
 
 DESIGN RULES (do not break — Stage 3 depends on them):
   * NO Gradio, NO file I/O, NO input()/print() in this module.
@@ -25,7 +26,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, asdict
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
-from typing import Any, NamedTuple, Optional
+from typing import Any, Iterable, List, NamedTuple, Optional
 
 
 # --------------------------------------------------------------------------- #
@@ -39,6 +40,8 @@ DISCOUNT_THRESHOLD = 5                # qty >= threshold => discount applies
 
 MIN_QTY = 1
 MAX_QTY = 10                          # outlet capacity per order (PRD FR-2)
+
+MIN_TOPPINGS = 1                      # at least one topping; multiple allowed
 
 NAME_MIN_LEN = 2
 NAME_MAX_LEN = 40
@@ -229,6 +232,22 @@ def validate_menu_selection(selection: Any, item_count: int) -> Result:
     return Result(True, "Selection accepted.", n)
 
 
+def validate_toppings_selection(selected_ids: Any) -> Result:
+    """Validate a multi-topping pick.
+
+    Rule: at least MIN_TOPPINGS topping must be chosen (multiple allowed).
+    `selected_ids` is whatever the caller already resolved to item ids (the
+    UI maps its widget's selected labels back to ids before calling this).
+
+    Returns Result(ok, message, value=list_of_ids).
+    """
+    ids = list(selected_ids) if selected_ids else []
+    if len(ids) < MIN_TOPPINGS:
+        plural = "topping" if MIN_TOPPINGS == 1 else "toppings"
+        return Result(False, f"Choose at least {MIN_TOPPINGS} {plural}.", None)
+    return Result(True, "Toppings accepted.", ids)
+
+
 def validate_payment(choice: Any) -> Result:
     """Validate a payment-mode choice and produce a mode-specific confirmation.
 
@@ -270,9 +289,15 @@ def payment_confirmation(mode: str) -> str:
 # Pricing engine (PRD FR-4). Order of operations is FIXED and testable:
 #   unit price -> subtotal -> discount -> GST -> final.
 # --------------------------------------------------------------------------- #
-def unit_price(base_price: Any, pizza_price: Any, topping_price: Any) -> Decimal:
-    """Unit price = base + pizza + topping. Returns a Decimal (2 dp)."""
-    total = to_money(base_price) + to_money(pizza_price) + to_money(topping_price)
+def unit_price(base_price: Any, pizza_price: Any, topping_prices: Iterable[Any]) -> Decimal:
+    """Unit price = base + pizza + sum of all chosen topping prices.
+
+    `topping_prices` is an iterable (one or more toppings can be selected per
+    order line). Returns a Decimal (2 dp).
+    """
+    total = to_money(base_price) + to_money(pizza_price)
+    for topping_price in topping_prices:
+        total += to_money(topping_price)
     return quantize_money(total)
 
 
@@ -290,24 +315,25 @@ def discount_for(subtotal: Decimal, qty: int) -> Decimal:
 def price_order(
     base_price: Any,
     pizza_price: Any,
-    topping_price: Any,
+    topping_prices: Iterable[Any],
     qty: int,
 ) -> Bill:
     """Compute the full bill for one order line.
 
     Fixed order of operations (PRD FR-4):
-        unit  = base + pizza + topping
+        unit  = base + pizza + sum(toppings)
         sub   = unit * qty
         disc  = DISCOUNT_RATE * sub   (only if qty >= DISCOUNT_THRESHOLD)
         gst   = GST_RATE * (sub - disc)        # GST on POST-discount subtotal
         final = (sub - disc) + gst
 
+    `topping_prices` is an iterable — one or more toppings per order line.
     `qty` is assumed already validated by `validate_quantity`. This function is
     pure: no I/O, no UI — safe for the Stage 3 LLM agent to call directly.
 
     Returns a Bill with all monetary fields as 2-dp Decimals.
     """
-    unit = unit_price(base_price, pizza_price, topping_price)
+    unit = unit_price(base_price, pizza_price, topping_prices)
     subtotal = quantize_money(unit * Decimal(qty))
     discount = discount_for(subtotal, qty)
     discounted = subtotal - discount
