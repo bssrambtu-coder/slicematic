@@ -8,30 +8,43 @@ that possible.
 ## Architecture — strict separation of concerns
 
 ```
+app.py            ROOT entry point (Hugging Face Spaces requires app.py at
+                  the repo root). Thin, state-driven Gradio UI: one step
+                  visible at a time, Back/Start-Over on every step, sold-out
+                  filtering via quota, styled HTML bill, Kitchen (Admin) tab.
+                  Calls core/menu/persistence/quota only. Fully implemented.
 src/
   core.py         PURE logic: validators + pricing/GST/discount.
                   NO Gradio, NO file I/O, NO input()/print(). Fully implemented & tested.
   menu.py         Defensive parser for the 3 menu .txt files. Does file I/O.  Fully implemented & tested.
   persistence.py  Appends completed orders to orders_log.txt.        Fully implemented & tested.
-  app.py          THIN Gradio UI. Calls core/menu/persistence only.  Fully implemented & tested.
+  quota.py        Daily per-item sold-out quota + midnight-IST reset. Fully implemented & tested.
 tests/
-  test_core.py        Full edge-case harness (the 8 graded cases + pricing). GREEN.
+  test_core.py        Full edge-case harness (8 graded cases + pricing + golden bill). GREEN.
   test_menu.py        Full parser test suite (malformed lines, missing files, swap test). GREEN.
   test_persistence.py Log read/write tests + phone-lookup hook. GREEN.
-  test_app.py          place_order orchestration + helper tests. GREEN.
-data/             The 3 swappable menu files (ID;Name;Price).
+  test_quota.py        Availability/consume/weekend-quota/reset tests. GREEN.
+data/             The 3 swappable menu files (ID;Name;Price) + quota_config.json.
 ```
 
-**The golden rule:** all business rules live in `core.py`. menu/persistence/app
+**The golden rule:** all business rules live in `core.py`. menu/persistence/quota/app
 must never re-derive validation, discount, or GST. The Stage 3 LLM agent will
 call the same `core` validators and `core.price_order` with plain arguments.
 
-All four modules are now fully implemented and tested (117 tests passing),
-and the app has been smoke-tested end-to-end against the real `data/` files —
-golden path and all 8 PRD edge cases verified live via `gradio_client` against
+All modules are fully implemented and tested (123 tests passing), and the app
+has been smoke-tested end-to-end against the real `data/` files — golden
+path, the golden-bill dataset to the paisa, Back/Start-Over preserving prior
+input, and sold-out filtering, all verified live via `gradio_client` against
 a running server. Treat `core`'s `Result`/`Bill` shapes, `menu`'s `MenuItem`/
-`load_all_menus`/`MenuFileError`, and `persistence`'s `LOG_FIELDS`/
-`OrderLogError` as stable APIs — coordinate before changing them.
+`load_all_menus`/`MenuFileError`, `persistence`'s `LOG_FIELDS`/
+`OrderLogError`, and `quota`'s `QuotaManager`/`QuotaConfigError` as stable
+APIs — coordinate before changing them.
+
+**Note on `app.py`'s location:** Hugging Face Spaces requires the entry point
+at the repo root, so `app.py` lives there (not in `src/`) and adds `src/` to
+`sys.path` itself. `src/menu.py`/`core.py`/`persistence.py`/`quota.py` still
+import each other as flat top-level modules (`import core`, not `from . import
+core`) — `pytest.ini`'s `pythonpath = src` makes that work for tests too.
 
 ## Hard rules from the PRD (the grader enforces these)
 
@@ -71,6 +84,6 @@ orders by phone via `persistence.find_orders_by_phone`.
 ```bash
 cd slicematic
 pip install -r requirements.txt
-pytest            # run the test suite
-python -m src.app # launch the Gradio app (once app.py is implemented)
+pytest      # run the test suite
+python app.py  # launch the Gradio app (entry point at repo root)
 ```

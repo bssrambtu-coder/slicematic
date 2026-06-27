@@ -232,6 +232,35 @@ class TestPricing:
 
 
 # --------------------------------------------------------------------------- #
+# Golden bill: Cheese Burst (229) + BBQ Chicken (379) + Extra Cheese (69).
+# Independent worked example, verified to the paisa.
+# --------------------------------------------------------------------------- #
+class TestGoldenBill:
+    BASE, PIZZA, TOP = 229, 379, 69
+    UNIT = Decimal("677.00")
+
+    def test_golden_bill_qty5_to_the_paisa(self):
+        bill = core.price_order(self.BASE, self.PIZZA, self.TOP, qty=5)
+        assert bill.unit_price == self.UNIT
+        assert bill.subtotal == Decimal("3385.00")
+        assert bill.discount == Decimal("338.50")
+        assert bill.subtotal - bill.discount == Decimal("3046.50")
+        assert bill.gst == Decimal("548.37")
+        assert bill.final_total == Decimal("3594.87")
+
+    def test_golden_bill_no_discount_qty4(self):
+        bill = core.price_order(self.BASE, self.PIZZA, self.TOP, qty=4)
+        assert bill.subtotal == Decimal("2708.00")
+        assert bill.discount == Decimal("0.00")
+        assert bill.gst == Decimal("487.44")
+        assert bill.final_total == Decimal("3195.44")
+
+    def test_golden_bill_boundary_qty_equals_threshold_discounts(self):
+        bill = core.price_order(self.BASE, self.PIZZA, self.TOP, qty=core.DISCOUNT_THRESHOLD)
+        assert bill.discount > Decimal("0.00")
+
+
+# --------------------------------------------------------------------------- #
 # Money formatting (PRD 3.6)
 # --------------------------------------------------------------------------- #
 def test_format_money_inr_two_decimals():

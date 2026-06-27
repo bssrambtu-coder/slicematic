@@ -1,0 +1,31 @@
+{
+  "bases": {
+    "B1": {"name": "Thin Crust", "weekday": 15, "weekend": 20},
+    "B2": {"name": "Thick Crust", "weekday": 15, "weekend": 20},
+    "B3": {"name": "Cheese Burst", "weekday": 15, "weekend": 20},
+    "B4": {"name": "Whole Wheat", "weekday": 10, "weekend": 15},
+    "B5": {"name": "Multigrain", "weekday": 10, "weekend": 15}
+  },
+  "pizzas": {
+    "P1": {"name": "Margherita", "weekday": 10, "weekend": 15},
+    "P2": {"name": "Chicago Deep Dish", "weekday": 10, "weekend": 15},
+    "P3": {"name": "Greek Mediterranean", "weekday": 10, "weekend": 15},
+    "P4": {"name": "California Veggie", "weekday": 10, "weekend": 15},
+    "P5": {"name": "Farm House", "weekday": 10, "weekend": 15},
+    "P6": {"name": "Pepperoni Classic", "weekday": 10, "weekend": 15},
+    "P7": {"name": "BBQ Chicken", "weekday": 10, "weekend": 15},
+    "P8": {"name": "Paneer Tikka", "weekday": 10, "weekend": 15}
+  },
+  "toppings": {
+    "T1": {"name": "Black Olives", "weekday": 999, "weekend": 999},
+    "T2": {"name": "Extra Cheese", "weekday": 999, "weekend": 999},
+    "T3": {"name": "Button Mushrooms", "weekday": 999, "weekend": 999},
+    "T4": {"name": "Green Peppers", "weekday": 999, "weekend": 999},
+    "T5": {"name": "Jalapenos", "weekday": 999, "weekend": 999},
+    "T6": {"name": "Sun-Dried Tomatoes", "weekday": 999, "weekend": 999},
+    "T7": {"name": "Caramelised Onions", "weekday": 999, "weekend": 999},
+    "T8": {"name": "Sweet Corn", "weekday": 999, "weekend": 999},
+    "T9": {"name": "Roasted Garlic", "weekday": 999, "weekend": 999},
+    "T10": {"name": "Peri-Peri Drizzle", "weekday": 999, "weekend": 999}
+  }
+}

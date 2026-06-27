@@ -3,3 +3,10 @@
 # on any recent Python 3.11+.
 gradio>=6.0,<7.0
 pytest>=8.0
+
+# quota.py's midnight-IST reset uses stdlib threading + zoneinfo (no extra
+# scheduler library needed). zoneinfo itself ships in the stdlib (3.9+), but
+# on Windows it has no built-in IANA tz database, so tzdata supplies it.
+# On Linux (incl. Hugging Face Spaces) the system tz database usually covers
+# this already, but pinning tzdata keeps behavior identical everywhere.
+tzdata>=2024.1
