@@ -237,7 +237,7 @@ class TestPricing:
 
 
 # --------------------------------------------------------------------------- #
-# Toppings selection (multi-select — at least one, multiple allowed)
+# Toppings selection (multi-select — optional, zero or more allowed)
 # --------------------------------------------------------------------------- #
 class TestValidateToppingsSelection:
     def test_single_topping_accepted(self):
@@ -251,11 +251,12 @@ class TestValidateToppingsSelection:
         assert res.value == ["T1", "T2", "T3"]
 
     @pytest.mark.parametrize("selected", [[], None])
-    def test_empty_selection_rejected(self, selected):
+    def test_no_toppings_is_valid(self, selected):
+        # Toppings are optional (MIN_TOPPINGS == 0) — "no toppings" is a
+        # legitimate choice, not an error.
         res = core.validate_toppings_selection(selected)
-        assert res.ok is False
-        assert res.value is None
-        assert res.message
+        assert res.ok is True
+        assert res.value == []
 
 
 # --------------------------------------------------------------------------- #
@@ -296,6 +297,56 @@ class TestGoldenBill:
         assert bill.discount == Decimal("363.00")
         assert bill.gst == Decimal("588.06")
         assert bill.final_total == Decimal("3855.06")
+
+
+# --------------------------------------------------------------------------- #
+# Cart pricing (multi-combo order — discount/GST apply at the ORDER level,
+# i.e. on the cart's TOTAL quantity across all combos, not per combo).
+# --------------------------------------------------------------------------- #
+class TestPriceCart:
+    # Line 1: Thin Crust(149) + Margherita(299) + Black Olives(49) = 497 unit.
+    # Line 2: Cheese Burst(229) + BBQ Chicken(379) + Extra Cheese(69) = 677 unit.
+    LINE1 = (149, 299, [49])
+    LINE2 = (229, 379, [69])
+
+    def test_single_line_cart_matches_price_order(self):
+        cart = core.price_cart([(*self.LINE1, 5)])
+        single = core.price_order(*self.LINE1, qty=5)
+        assert cart.subtotal == single.subtotal
+        assert cart.discount == single.discount
+        assert cart.gst == single.gst
+        assert cart.final_total == single.final_total
+        assert cart.total_quantity == 5
+        assert len(cart.lines) == 1
+
+    def test_discount_applies_when_combined_quantity_hits_threshold(self):
+        # Neither line alone reaches DISCOUNT_THRESHOLD (3 and 2), but their
+        # SUM (5) does — discount must still apply across the whole cart.
+        cart = core.price_cart([(*self.LINE1, 3), (*self.LINE2, 2)])
+        assert cart.total_quantity == 5
+        assert cart.subtotal == Decimal("2845.00")
+        assert cart.discount == Decimal("284.50")
+        assert cart.gst == Decimal("460.89")
+        assert cart.final_total == Decimal("3021.39")
+
+    def test_no_discount_when_combined_quantity_below_threshold(self):
+        cart = core.price_cart([(*self.LINE1, 2), (*self.LINE2, 2)])
+        assert cart.total_quantity == 4
+        assert cart.subtotal == Decimal("2348.00")
+        assert cart.discount == Decimal("0.00")
+        assert cart.gst == Decimal("422.64")
+        assert cart.final_total == Decimal("2770.64")
+
+    def test_each_line_keeps_its_own_unit_price_and_subtotal(self):
+        cart = core.price_cart([(*self.LINE1, 3), (*self.LINE2, 2)])
+        assert cart.lines[0].unit_price == Decimal("497.00")
+        assert cart.lines[0].subtotal == Decimal("1491.00")
+        assert cart.lines[1].unit_price == Decimal("677.00")
+        assert cart.lines[1].subtotal == Decimal("1354.00")
+
+    def test_empty_topping_line_in_cart(self):
+        cart = core.price_cart([(149, 299, [], 1)])
+        assert cart.lines[0].unit_price == Decimal("448.00")
 
 
 # --------------------------------------------------------------------------- #

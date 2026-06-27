@@ -3,9 +3,18 @@ app.py — SliceMatic Gradio UI (root entry point for Hugging Face Spaces).
 
 Stays THIN: every validation, price, and quota decision is delegated to
 src/core.py, src/menu.py, src/persistence.py, src/quota.py. This file only
-collects input, calls those modules, and renders the result as a
-state-driven, one-step-at-a-time order flow with Back/Start-Over on every
-step (prior input is never lost — it lives in the gr.State dict).
+collects input, calls those modules, and renders the result.
+
+Cart-style ordering flow: a customer can add MULTIPLE base+pizza+topping(s)
+combos to one order, each with its own quantity, before checking out once for
+the whole order. Toppings are optional (zero, one, or many per combo — there's
+an explicit "Skip" as well as "Next" with nothing checked). Discount and GST
+apply at the ORDER level (core.price_cart), keyed on the combined quantity
+across every combo in the cart, not any single combo — this is what
+"order-level discount" means once an order can hold more than one combo.
+
+State-driven, one step visible at a time, with Back/Start-Over on every step
+(prior input is never lost — it lives in the gr.State dict).
 
 Run with:  python app.py   (from the slicematic/ root)
 """
@@ -35,7 +44,7 @@ DATA_DIR = ROOT_DIR / "data"
 LOG_PATH = ROOT_DIR / "orders_log.txt"
 QUOTA_CONFIG_PATH = DATA_DIR / "quota_config.json"
 
-STEPS = ["name", "phone", "qty", "base", "pizza", "topping", "bill", "payment", "confirmation"]
+STEPS = ["name", "phone", "base", "pizza", "topping", "qty", "cart", "bill", "payment", "confirmation"]
 
 # Populated once at startup by main(); never re-parsed per request.
 _MENU: Dict[str, List[menu.MenuItem]] = {}
@@ -43,17 +52,22 @@ _QUOTA: Optional[quota.QuotaManager] = None
 
 
 def fresh_state() -> dict:
-    """A brand-new, empty order — the shape held in gr.State for one session."""
+    """A brand-new, empty order — the shape held in gr.State for one session.
+
+    `cart` accumulates committed combos: [{base_id, pizza_id, topping_ids, qty}, ...].
+    base_id/pizza_id/topping_ids/qty (top-level) hold the COMBO currently being
+    built, separate from anything already added to the cart.
+    """
     return {
         "step": "name",
         "name": None,
         "phone": None,
-        "qty": None,
         "base_id": None,
         "pizza_id": None,
         "topping_ids": [],
+        "qty": None,
+        "cart": [],
         "payment_mode": None,
-        "bill": None,
         "confirmation_html": "",
     }
 
@@ -117,55 +131,100 @@ def _sold_out_markdown(names: List[str]) -> str:
     return f"<span style='color:#999;'>Sold out today: {escaped}</span>"
 
 
+def _combo_description(line: dict) -> str:
+    base_item = _item_by_id("base", line["base_id"])
+    pizza_item = _item_by_id("pizza", line["pizza_id"])
+    topping_items = [_item_by_id("topping", tid) for tid in line["topping_ids"]]
+    topping_text = ", ".join(t.name for t in topping_items) if topping_items else "No toppings"
+    return f"{html.escape(base_item.name)} + {html.escape(pizza_item.name)} + {html.escape(topping_text)}"
+
+
+def _cart_bill(state: dict) -> Optional[core.CartBill]:
+    """Price the whole cart (order-level discount/GST). None if cart is empty."""
+    if not state["cart"]:
+        return None
+    line_items = []
+    for line in state["cart"]:
+        base_item = _item_by_id("base", line["base_id"])
+        pizza_item = _item_by_id("pizza", line["pizza_id"])
+        topping_items = [_item_by_id("topping", tid) for tid in line["topping_ids"]]
+        line_items.append((base_item.price, pizza_item.price, [t.price for t in topping_items], line["qty"]))
+    return core.price_cart(line_items)
+
+
+def _cart_html(state: dict) -> str:
+    cart = state["cart"]
+    if not cart:
+        return "<p style='color:#999;'>Your cart is empty. Add a combo to get started.</p>"
+
+    cart_bill = _cart_bill(state)
+    rows = "".join(
+        f"<tr><td>{_combo_description(line)} &times; {line_bill.quantity}</td>"
+        f"<td style='text-align:right;'>{core.format_money(line_bill.subtotal)}</td></tr>"
+        for line, line_bill in zip(cart, cart_bill.lines)
+    )
+    item_word = "item" if cart_bill.total_quantity == 1 else "items"
+    return f"""
+    <div style="border:1px solid #ddd;border-radius:8px;padding:16px;max-width:520px;font-family:sans-serif;">
+      <h3 style="color:#c1121f;margin-top:0;">🛒 Your Cart</h3>
+      <table style="width:100%;border-collapse:collapse;">
+        {rows}
+        <tr style="border-top:1px solid #ddd;">
+          <td><b>Running subtotal ({cart_bill.total_quantity} {item_word})</b></td>
+          <td style="text-align:right;"><b>{core.format_money(cart_bill.subtotal)}</b></td>
+        </tr>
+      </table>
+      <p style="color:#777;font-size:0.9em;">Discount and GST are calculated at checkout, based on your full order.</p>
+    </div>
+    """
+
+
 def _bill_html(state: dict) -> str:
-    base_item = _item_by_id("base", state["base_id"])
-    pizza_item = _item_by_id("pizza", state["pizza_id"])
-    topping_items = [_item_by_id("topping", tid) for tid in state.get("topping_ids", [])]
-    bill: core.Bill = state["bill"]
-    if not (base_item and pizza_item and topping_items and bill):
+    cart_bill = _cart_bill(state)
+    if not cart_bill:
         return ""
 
-    topping_rows = "".join(
-        f"<tr><td>{html.escape(t.name)}</td><td style='text-align:right;'>{core.format_money(t.price)}</td></tr>"
-        for t in topping_items
+    rows = "".join(
+        f"<tr><td>{_combo_description(line)} &times; {line_bill.quantity}</td>"
+        f"<td style='text-align:right;'>{core.format_money(line_bill.subtotal)}</td></tr>"
+        for line, line_bill in zip(state["cart"], cart_bill.lines)
     )
 
     discount_row = ""
-    if bill.discount > 0:
+    if cart_bill.discount > 0:
         # Explicit text color (not just background) — without it, this row
         # inherits Gradio's theme default text color, which can be white and
         # invisible against a light highlight background in dark mode.
         discount_row = (
             "<tr style='background:#d4edda;color:#155724;'>"
             "<td style='color:#155724;'>Discount</td>"
-            f"<td style='text-align:right;color:#155724;'>-{core.format_money(bill.discount)}</td></tr>"
+            f"<td style='text-align:right;color:#155724;'>-{core.format_money(cart_bill.discount)}</td></tr>"
         )
 
+    item_word = "item" if cart_bill.total_quantity == 1 else "items"
     return f"""
-    <div style="border:1px solid #ddd;border-radius:8px;padding:16px;max-width:440px;font-family:sans-serif;">
+    <div style="border:1px solid #ddd;border-radius:8px;padding:16px;max-width:520px;font-family:sans-serif;">
       <h3 style="color:#c1121f;margin-top:0;">🍕 SliceMatic Bill</h3>
       <table style="width:100%;border-collapse:collapse;">
-        <tr><td>{html.escape(base_item.name)}</td><td style="text-align:right;">{core.format_money(base_item.price)}</td></tr>
-        <tr><td>{html.escape(pizza_item.name)}</td><td style="text-align:right;">{core.format_money(pizza_item.price)}</td></tr>
-        {topping_rows}
-        <tr><td>Unit price</td><td style="text-align:right;">{core.format_money(bill.unit_price)}</td></tr>
-        <tr><td>Subtotal &times; {bill.quantity}</td><td style="text-align:right;">{core.format_money(bill.subtotal)}</td></tr>
+        {rows}
+        <tr><td>Subtotal ({cart_bill.total_quantity} {item_word})</td>
+            <td style="text-align:right;">{core.format_money(cart_bill.subtotal)}</td></tr>
         {discount_row}
-        <tr><td>GST (18%)</td><td style="text-align:right;">+{core.format_money(bill.gst)}</td></tr>
+        <tr><td>GST (18%)</td><td style="text-align:right;">+{core.format_money(cart_bill.gst)}</td></tr>
         <tr style="border-top:2px solid #c1121f;"><td><b>Total Payable</b></td>
-            <td style="text-align:right;color:#c1121f;"><b>{core.format_money(bill.final_total)}</b></td></tr>
+            <td style="text-align:right;color:#c1121f;"><b>{core.format_money(cart_bill.final_total)}</b></td></tr>
       </table>
     </div>
     """
 
 
 def _confirmation_html(state: dict, confirmation_message: str) -> str:
-    bill: core.Bill = state["bill"]
+    cart_bill = _cart_bill(state)
     return f"""
     <div style="border:2px solid #2a9d8f;border-radius:8px;padding:16px;max-width:440px;font-family:sans-serif;">
       <h3 style="color:#2a9d8f;margin-top:0;">✅ Order Confirmed!</h3>
       <p>Thanks, {html.escape(state['name'])} — your order is on its way.</p>
-      <p><b>Total paid:</b> {core.format_money(bill.final_total)}</p>
+      <p><b>Total paid:</b> {core.format_money(cart_bill.final_total)}</p>
       <p>{html.escape(confirmation_message)}</p>
     </div>
     """
@@ -201,8 +260,8 @@ def _kitchen_html() -> str:
 # --------------------------------------------------------------------------- #
 # render(state) -> list of gr.update(...) in ALL_OUTPUTS order. Every step
 # handler ends by calling this so the whole page (visible step, restored
-# field values, live menu/quota, bill/confirmation HTML, kitchen view, and
-# any error banner) re-renders consistently from one source of truth: state.
+# field values, live menu/quota, cart/bill/confirmation HTML, kitchen view,
+# and any error banner) re-renders consistently from one source of truth.
 # --------------------------------------------------------------------------- #
 def render(state: dict, error: Optional[str] = None) -> list:
     step = state["step"]
@@ -214,23 +273,25 @@ def render(state: dict, error: Optional[str] = None) -> list:
     pizza_choices, pizza_label_to_id, pizza_sold_out = _radio_choices_for("pizza")
     topping_choices, topping_label_to_id, topping_sold_out = _radio_choices_for("topping")
 
+    cart_html_value = _cart_html(state) if step == "cart" else ""
     bill_html_value = _bill_html(state) if step in ("bill", "payment", "confirmation") else ""
     confirmation_html_value = state.get("confirmation_html", "") if step == "confirmation" else ""
     status_value = f"⚠️ {error}" if error else ""
 
     return [
-        vis("name"), vis("phone"), vis("qty"),
-        vis("base"), vis("pizza"), vis("topping"),
-        vis("bill"), vis("payment"), vis("confirmation"),
+        vis("name"), vis("phone"),
+        vis("base"), vis("pizza"), vis("topping"), vis("qty"),
+        vis("cart"), vis("bill"), vis("payment"), vis("confirmation"),
         gr.update(value=state.get("name") or ""),
         gr.update(value=state.get("phone") or ""),
-        gr.update(value=state.get("qty")),
         gr.update(choices=base_choices, value=_id_to_label(state.get("base_id"), base_label_to_id)),
         gr.update(value=_sold_out_markdown(base_sold_out)),
         gr.update(choices=pizza_choices, value=_id_to_label(state.get("pizza_id"), pizza_label_to_id)),
         gr.update(value=_sold_out_markdown(pizza_sold_out)),
         gr.update(choices=topping_choices, value=_ids_to_labels(state.get("topping_ids", []), topping_label_to_id)),
         gr.update(value=_sold_out_markdown(topping_sold_out)),
+        gr.update(value=state.get("qty")),
+        gr.update(value=cart_html_value),
         gr.update(value=state.get("payment_mode")),
         gr.update(value=bill_html_value),
         gr.update(value=confirmation_html_value),
@@ -257,15 +318,6 @@ def submit_phone(state: dict, value: str):
     if not res.ok:
         return [state, *render(state, error=res.message)]
     state["phone"] = res.value
-    state["step"] = "qty"
-    return [state, *render(state)]
-
-
-def submit_qty(state: dict, value):
-    res = core.validate_quantity(value)
-    if not res.ok:
-        return [state, *render(state, error=res.message)]
-    state["qty"] = res.value
     state["step"] = "base"
     return [state, *render(state)]
 
@@ -306,10 +358,57 @@ def submit_topping(state: dict, selected_labels: Optional[List[str]]):
         return [state, *render(state, error="One of those toppings just sold out — please reselect.")]
 
     state["topping_ids"] = topping_ids
-    base_item = _item_by_id("base", state["base_id"])
-    pizza_item = _item_by_id("pizza", state["pizza_id"])
-    topping_prices = [_item_by_id("topping", tid).price for tid in topping_ids]
-    state["bill"] = core.price_order(base_item.price, pizza_item.price, topping_prices, state["qty"])
+    state["step"] = "qty"
+    return [state, *render(state)]
+
+
+def skip_toppings(state: dict):
+    """Explicit 'no toppings for this combo' — proceeds the same as Next
+    with nothing checked (toppings are optional; MIN_TOPPINGS == 0)."""
+    state["topping_ids"] = []
+    state["step"] = "qty"
+    return [state, *render(state)]
+
+
+def submit_qty(state: dict, value):
+    """Validate quantity, commit the in-progress combo as a new cart line,
+    then clear the in-progress fields so the next combo starts fresh."""
+    res = core.validate_quantity(value)
+    if not res.ok:
+        return [state, *render(state, error=res.message)]
+
+    state["cart"].append(
+        {
+            "base_id": state["base_id"],
+            "pizza_id": state["pizza_id"],
+            "topping_ids": list(state["topping_ids"]),
+            "qty": res.value,
+        }
+    )
+    state["base_id"] = None
+    state["pizza_id"] = None
+    state["topping_ids"] = []
+    state["qty"] = None
+    state["step"] = "cart"
+    return [state, *render(state)]
+
+
+def add_another_item(state: dict):
+    state["step"] = "base"
+    return [state, *render(state)]
+
+
+def remove_last_item(state: dict):
+    if state["cart"]:
+        state["cart"].pop()
+    if not state["cart"]:
+        return [state, *render(state, error="Cart is now empty — add an item to continue.")]
+    return [state, *render(state)]
+
+
+def checkout(state: dict):
+    if not state["cart"]:
+        return [state, *render(state, error="Add at least one item to your cart before checking out.")]
     state["step"] = "bill"
     return [state, *render(state)]
 
@@ -325,39 +424,50 @@ def submit_payment(state: dict, choice: Optional[str]):
         return [state, *render(state, error=res.message)]
     state["payment_mode"] = res.value
 
-    base_item = _item_by_id("base", state["base_id"])
-    pizza_item = _item_by_id("pizza", state["pizza_id"])
-    topping_items = [_item_by_id("topping", tid) for tid in state["topping_ids"]]
-    bill: core.Bill = state["bill"]
+    cart_bill = _cart_bill(state)
+    timestamp = _session_timestamp()
 
-    # orders_log.txt keeps its fixed 15-column shape (Stage 3 importer depends
-    # on it) even with multiple toppings: names are joined into one field and
-    # prices summed into one field, rather than adding a variable column count.
-    record = {
-        "timestamp": _session_timestamp(),
-        "name": state["name"],
-        "phone": state["phone"],
-        "base_name": base_item.name,
-        "base_price": base_item.price,
-        "pizza_name": pizza_item.name,
-        "pizza_price": pizza_item.price,
-        "topping_name": "; ".join(t.name for t in topping_items),
-        "topping_price": sum((t.price for t in topping_items), start=Decimal("0")),
-        "qty": bill.quantity,
-        "subtotal": bill.subtotal,
-        "discount": bill.discount,
-        "gst": bill.gst,
-        "final_total": bill.final_total,
-        "payment_mode": state["payment_mode"],
-    }
+    # orders_log.txt keeps its fixed 15-column shape (Stage 3 importer maps
+    # this one-to-one onto "orders + order_line_items"): one row per cart
+    # combo (own base/pizza/topping/qty/subtotal), sharing the same
+    # timestamp+name+phone, with the ORDER-level discount/gst/final_total
+    # repeated identically on every row of that order.
+    records = []
+    for line, line_bill in zip(state["cart"], cart_bill.lines):
+        base_item = _item_by_id("base", line["base_id"])
+        pizza_item = _item_by_id("pizza", line["pizza_id"])
+        topping_items = [_item_by_id("topping", tid) for tid in line["topping_ids"]]
+        records.append(
+            {
+                "timestamp": timestamp,
+                "name": state["name"],
+                "phone": state["phone"],
+                "base_name": base_item.name,
+                "base_price": base_item.price,
+                "pizza_name": pizza_item.name,
+                "pizza_price": pizza_item.price,
+                "topping_name": "; ".join(t.name for t in topping_items) if topping_items else "None",
+                "topping_price": sum((t.price for t in topping_items), start=Decimal("0")),
+                "qty": line_bill.quantity,
+                "subtotal": line_bill.subtotal,
+                "discount": cart_bill.discount,
+                "gst": cart_bill.gst,
+                "final_total": cart_bill.final_total,
+                "payment_mode": state["payment_mode"],
+            }
+        )
+
     try:
-        persistence.append_order(record, LOG_PATH)
+        for record in records:
+            persistence.append_order(record, LOG_PATH)
     except persistence.OrderLogError as exc:
         return [state, *render(state, error=f"Order was priced but could not be saved: {exc}")]
 
-    # Decrement base and pizza stock; toppings are effectively unlimited (999).
-    _QUOTA.consume(state["base_id"])
-    _QUOTA.consume(state["pizza_id"])
+    # Decrement base/pizza stock for every combo; toppings are effectively
+    # unlimited (999) so they're never consumed.
+    for line in state["cart"]:
+        _QUOTA.consume(line["base_id"])
+        _QUOTA.consume(line["pizza_id"])
 
     state["confirmation_html"] = _confirmation_html(state, res.message)
     state["step"] = "confirmation"
@@ -365,7 +475,14 @@ def submit_payment(state: dict, choice: Optional[str]):
 
 
 def go_back(state: dict):
-    idx = STEPS.index(state["step"])
+    step = state["step"]
+    if step == "base" and state["cart"]:
+        # Reached "base" via "Add Another Item" from the cart (not from
+        # phone) — Back should return to reviewing the cart, not walk
+        # backwards into a different, already-committed combo's fields.
+        state["step"] = "cart"
+        return [state, *render(state)]
+    idx = STEPS.index(step)
     if idx > 0:
         state["step"] = STEPS[idx - 1]
     return [state, *render(state)]
@@ -412,16 +529,8 @@ def build_ui() -> gr.Blocks:
                     cancel_phone = gr.Button("Start Over")
                     next_phone = gr.Button("Next", variant="primary")
 
-            with gr.Group(visible=False) as grp_qty:
-                gr.Markdown("### Step 3 — Quantity")
-                qty_box = gr.Number(label="Quantity (1-10)", precision=0)
-                with gr.Row():
-                    back_qty = gr.Button("Back")
-                    cancel_qty = gr.Button("Start Over")
-                    next_qty = gr.Button("Next", variant="primary")
-
             with gr.Group(visible=False) as grp_base:
-                gr.Markdown("### Step 4 — Choose Your Base")
+                gr.Markdown("### Choose a Base")
                 base_sold_out_md = gr.Markdown()
                 base_radio = gr.Radio(label="Base", choices=[], elem_classes="vertical-options")
                 with gr.Row():
@@ -430,7 +539,7 @@ def build_ui() -> gr.Blocks:
                     next_base = gr.Button("Next", variant="primary")
 
             with gr.Group(visible=False) as grp_pizza:
-                gr.Markdown("### Step 5 — Choose Your Pizza")
+                gr.Markdown("### Choose a Pizza")
                 pizza_sold_out_md = gr.Markdown()
                 pizza_radio = gr.Radio(label="Pizza", choices=[], elem_classes="vertical-options")
                 with gr.Row():
@@ -439,16 +548,35 @@ def build_ui() -> gr.Blocks:
                     next_pizza = gr.Button("Next", variant="primary")
 
             with gr.Group(visible=False) as grp_topping:
-                gr.Markdown("### Step 6 — Choose Your Toppings (one or more)")
+                gr.Markdown("### Choose Toppings (optional — pick any number, or none)")
                 topping_sold_out_md = gr.Markdown()
                 topping_checkboxes = gr.CheckboxGroup(label="Toppings", choices=[], elem_classes="vertical-options")
                 with gr.Row():
                     back_topping = gr.Button("Back")
                     cancel_topping = gr.Button("Start Over")
+                    skip_topping_btn = gr.Button("Skip (No Toppings)")
                     next_topping = gr.Button("Next", variant="primary")
 
+            with gr.Group(visible=False) as grp_qty:
+                gr.Markdown("### Quantity for This Combo")
+                qty_box = gr.Number(label="Quantity (1-10)", precision=0)
+                with gr.Row():
+                    back_qty = gr.Button("Back")
+                    cancel_qty = gr.Button("Start Over")
+                    next_qty = gr.Button("Add to Cart", variant="primary")
+
+            with gr.Group(visible=False) as grp_cart:
+                gr.Markdown("### Your Cart")
+                cart_html_box = gr.HTML()
+                with gr.Row():
+                    remove_last_btn = gr.Button("Remove Last Item")
+                    cancel_cart = gr.Button("Start Over")
+                with gr.Row():
+                    add_another_btn = gr.Button("Add Another Item")
+                    checkout_btn = gr.Button("Checkout", variant="primary")
+
             with gr.Group(visible=False) as grp_bill:
-                gr.Markdown("### Step 7 — Your Bill")
+                gr.Markdown("### Your Bill")
                 bill_html_box = gr.HTML()
                 with gr.Row():
                     back_bill = gr.Button("Back")
@@ -456,7 +584,7 @@ def build_ui() -> gr.Blocks:
                     next_bill = gr.Button("Continue to Payment", variant="primary")
 
             with gr.Group(visible=False) as grp_payment:
-                gr.Markdown("### Step 8 — Payment")
+                gr.Markdown("### Payment")
                 payment_radio = gr.Radio(label="Payment Mode", choices=["Cash", "Card", "UPI"])
                 with gr.Row():
                     back_payment = gr.Button("Back")
@@ -476,11 +604,15 @@ def build_ui() -> gr.Blocks:
             kitchen_refresh_btn = gr.Button("Refresh")
 
         all_outputs = [
-            grp_name, grp_phone, grp_qty, grp_base, grp_pizza, grp_topping, grp_bill, grp_payment, grp_confirmation,
-            name_box, phone_box, qty_box,
+            grp_name, grp_phone,
+            grp_base, grp_pizza, grp_topping, grp_qty,
+            grp_cart, grp_bill, grp_payment, grp_confirmation,
+            name_box, phone_box,
             base_radio, base_sold_out_md,
             pizza_radio, pizza_sold_out_md,
             topping_checkboxes, topping_sold_out_md,
+            qty_box,
+            cart_html_box,
             payment_radio,
             bill_html_box, confirmation_html_box,
             status_md, kitchen_html_box,
@@ -493,10 +625,6 @@ def build_ui() -> gr.Blocks:
         back_phone.click(go_back, inputs=[state], outputs=[state, *all_outputs])
         cancel_phone.click(start_over, inputs=[state], outputs=[state, *all_outputs])
 
-        next_qty.click(submit_qty, inputs=[state, qty_box], outputs=[state, *all_outputs])
-        back_qty.click(go_back, inputs=[state], outputs=[state, *all_outputs])
-        cancel_qty.click(start_over, inputs=[state], outputs=[state, *all_outputs])
-
         next_base.click(submit_base, inputs=[state, base_radio], outputs=[state, *all_outputs])
         back_base.click(go_back, inputs=[state], outputs=[state, *all_outputs])
         cancel_base.click(start_over, inputs=[state], outputs=[state, *all_outputs])
@@ -506,8 +634,18 @@ def build_ui() -> gr.Blocks:
         cancel_pizza.click(start_over, inputs=[state], outputs=[state, *all_outputs])
 
         next_topping.click(submit_topping, inputs=[state, topping_checkboxes], outputs=[state, *all_outputs])
+        skip_topping_btn.click(skip_toppings, inputs=[state], outputs=[state, *all_outputs])
         back_topping.click(go_back, inputs=[state], outputs=[state, *all_outputs])
         cancel_topping.click(start_over, inputs=[state], outputs=[state, *all_outputs])
+
+        next_qty.click(submit_qty, inputs=[state, qty_box], outputs=[state, *all_outputs])
+        back_qty.click(go_back, inputs=[state], outputs=[state, *all_outputs])
+        cancel_qty.click(start_over, inputs=[state], outputs=[state, *all_outputs])
+
+        add_another_btn.click(add_another_item, inputs=[state], outputs=[state, *all_outputs])
+        remove_last_btn.click(remove_last_item, inputs=[state], outputs=[state, *all_outputs])
+        checkout_btn.click(checkout, inputs=[state], outputs=[state, *all_outputs])
+        cancel_cart.click(start_over, inputs=[state], outputs=[state, *all_outputs])
 
         next_bill.click(continue_to_payment, inputs=[state], outputs=[state, *all_outputs])
         back_bill.click(go_back, inputs=[state], outputs=[state, *all_outputs])

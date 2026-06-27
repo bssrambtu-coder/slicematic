@@ -41,7 +41,7 @@ DISCOUNT_THRESHOLD = 5                # qty >= threshold => discount applies
 MIN_QTY = 1
 MAX_QTY = 10                          # outlet capacity per order (PRD FR-2)
 
-MIN_TOPPINGS = 1                      # at least one topping; multiple allowed
+MIN_TOPPINGS = 0                      # toppings are optional; zero or more allowed
 
 NAME_MIN_LEN = 2
 NAME_MAX_LEN = 40
@@ -93,6 +93,39 @@ class Bill:
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class CartLineBill:
+    """Pricing for one combo within a multi-combo cart order.
+
+    Deliberately carries NO discount/gst/final_total of its own — those are
+    order-level figures computed once across the whole cart by price_cart,
+    not per line (PRD's discount rule is "order-level").
+    """
+
+    unit_price: Decimal
+    quantity: int
+    subtotal: Decimal
+
+
+@dataclass(frozen=True)
+class CartBill:
+    """A fully priced multi-combo cart order. All monetary fields Decimal, 2 dp.
+
+    `lines` has the same length/order as the cart passed to price_cart.
+    `subtotal`/`discount`/`gst`/`final_total` are ORDER-level: discount and
+    the qty>=DISCOUNT_THRESHOLD check apply to the cart's TOTAL quantity, not
+    any single line (this is what "order-level discount" in the PRD means
+    once an order can contain more than one combo).
+    """
+
+    lines: List[CartLineBill]
+    total_quantity: int
+    subtotal: Decimal
+    discount: Decimal
+    gst: Decimal
+    final_total: Decimal
 
 
 # --------------------------------------------------------------------------- #
@@ -235,9 +268,12 @@ def validate_menu_selection(selection: Any, item_count: int) -> Result:
 def validate_toppings_selection(selected_ids: Any) -> Result:
     """Validate a multi-topping pick.
 
-    Rule: at least MIN_TOPPINGS topping must be chosen (multiple allowed).
-    `selected_ids` is whatever the caller already resolved to item ids (the
-    UI maps its widget's selected labels back to ids before calling this).
+    Rule: toppings are optional (MIN_TOPPINGS = 0) — zero, one, or many are
+    all valid; there is no upper limit. `selected_ids` is whatever the caller
+    already resolved to item ids (the UI maps its widget's selected labels
+    back to ids before calling this). Kept as a real validator (rather than
+    just accepting the raw value) so a future MIN_TOPPINGS > 0 requirement
+    only needs to change the constant.
 
     Returns Result(ok, message, value=list_of_ids).
     """
@@ -343,6 +379,49 @@ def price_order(
         unit_price=unit,
         quantity=qty,
         subtotal=subtotal,
+        discount=discount,
+        gst=gst,
+        final_total=final_total,
+    )
+
+
+def price_cart(
+    line_items: Iterable[tuple[Any, Any, Iterable[Any], int]],
+) -> CartBill:
+    """Compute the full bill for a cart of one-or-more combos.
+
+    Each item in `line_items` is (base_price, pizza_price, topping_prices, qty)
+    for one combo. Fixed order of operations, now applied at the CART level
+    (PRD's discount rule is "order-level", which only matters once an order
+    can contain more than one combo):
+
+        line subtotal_i = unit_price_i * qty_i        (no per-line discount)
+        cart subtotal    = sum(line subtotal_i)
+        total qty        = sum(qty_i)
+        discount         = DISCOUNT_RATE * cart subtotal  if total qty >= DISCOUNT_THRESHOLD
+        gst               = GST_RATE * (cart subtotal - discount)
+        final total        = (cart subtotal - discount) + gst
+
+    `qty` per line is assumed already validated by `validate_quantity`. Pure:
+    no I/O, no UI — safe for the Stage 3 LLM agent to call directly.
+    """
+    lines: List[CartLineBill] = []
+    for base_price, pizza_price, topping_prices, qty in line_items:
+        unit = unit_price(base_price, pizza_price, topping_prices)
+        line_subtotal = quantize_money(unit * Decimal(qty))
+        lines.append(CartLineBill(unit_price=unit, quantity=qty, subtotal=line_subtotal))
+
+    total_qty = sum(line.quantity for line in lines)
+    cart_subtotal = quantize_money(sum((line.subtotal for line in lines), Decimal("0")))
+    discount = discount_for(cart_subtotal, total_qty)
+    discounted = cart_subtotal - discount
+    gst = quantize_money(discounted * GST_RATE)
+    final_total = quantize_money(discounted + gst)
+
+    return CartBill(
+        lines=lines,
+        total_quantity=total_qty,
+        subtotal=cart_subtotal,
         discount=discount,
         gst=gst,
         final_total=final_total,

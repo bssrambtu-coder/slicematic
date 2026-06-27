@@ -34,33 +34,45 @@ Requires Python 3.11+.
 1. Collects a customer name and 10-digit mobile number (validated), one step
    at a time, with Back/Start-Over available on every step.
 2. Loads the menu (base, pizza, topping) at runtime from `data/*.txt`.
-3. Takes a quantity (1–10) and computes the bill:
-   **unit price → subtotal → 10% discount if qty ≥ 5 → 18% GST → final total.**
-4. Filters out items that are sold out for the day (see Quota logic below) and
+3. **Cart flow** — for each combo: choose a base, a pizza, and any number of
+   toppings (zero is fine — there's an explicit "Skip" as well as "Next" with
+   nothing checked), then a quantity (1–10), then **Add to Cart**. From the
+   cart you can **Add Another Item** (another base+pizza+toppings+qty combo),
+   **Remove Last Item**, or **Checkout**.
+4. At checkout, the WHOLE order is priced together:
+   **per-combo unit price × qty → cart subtotal → 10% discount if the
+   order's TOTAL quantity (summed across every combo) ≥ 5 → 18% GST → final
+   total.** The discount is order-level on purpose — e.g. 3× one combo + 2× a
+   different combo (5 total) still gets the discount, even though neither
+   combo alone reached 5.
+5. Filters out items that are sold out for the day (see Quota logic below) and
    greys them out as "Sold out today" instead of letting them be picked.
-5. Confirms a payment mode (Cash / Card / UPI), renders a styled bill, then
-   appends the completed order to `orders_log.txt` for later analytics.
-6. A separate **Kitchen (Admin)** tab shows remaining-today stock per item.
+6. Confirms a payment mode (Cash / Card / UPI), renders a styled bill, then
+   appends the completed order to `orders_log.txt` — one row per combo, all
+   sharing the same timestamp/name/phone, for later analytics.
+7. A separate **Kitchen (Admin)** tab shows remaining-today stock per item.
 
 ## Repository layout
 
 | Path | Purpose | Status |
 |------|---------|--------|
-| `app.py` | Thin, state-driven Gradio UI (root entry point, required by Hugging Face Spaces) | ✅ implemented + smoke-tested |
-| `src/core.py` | Pure validators + pricing/GST/discount engine | ✅ implemented + tested |
+| `app.py` | Thin, state-driven cart-flow Gradio UI (root entry point, required by Hugging Face Spaces) | ✅ implemented + smoke-tested |
+| `src/core.py` | Pure validators + per-combo and order-level (cart) pricing engine | ✅ implemented + tested |
 | `src/menu.py` | Defensive `ID;Name;Price` file parser | ✅ implemented + tested |
 | `src/persistence.py` | Append orders to `orders_log.txt` | ✅ implemented + tested |
 | `src/quota.py` | Daily per-item sold-out quota + midnight-IST reset | ✅ implemented + tested |
-| `tests/test_core.py` | Edge-case harness (8 graded cases + pricing + golden bill) | ✅ green |
+| `tests/test_core.py` | Edge-case harness (8 graded cases + pricing + golden bill + cart pricing) | ✅ green |
 | `tests/test_menu.py` | Parser test suite | ✅ green |
 | `tests/test_persistence.py` | Order log read/write + phone lookup | ✅ green |
 | `tests/test_quota.py` | Quota availability/consume/weekend/reset tests | ✅ green |
 | `data/*.txt`, `data/quota_config.json` | Swappable menu + quota config | ✅ sample data |
 
-123 tests pass. The app has been smoke-tested end-to-end via `gradio_client`
-against a live `python app.py` server: golden path, the golden-bill dataset
-(₹229+₹379+₹69, qty 5 → ₹3594.87 to the paisa), Back/Start-Over preserving
-prior input, sold-out filtering, and quota decrementing on order placement.
+134 tests pass. The app has been smoke-tested end-to-end via a real
+browser (Playwright): golden path, the golden-bill dataset (₹229+₹379+₹69,
+qty 5 → ₹3594.87 to the paisa), a multi-combo cart where the order-level
+discount triggers on combined quantity, "no toppings" via Skip, Back/Start-Over
+preserving prior input, sold-out filtering, and quota decrementing on order
+placement.
 
 ## Quota / sold-out logic
 
@@ -112,6 +124,15 @@ topping_name | topping_price | qty | subtotal | discount | gst | final_total | p
 
 `phone` is the customer key — `persistence.find_orders_by_phone` is the
 Stage 3 Option-A (recommendation engine) lookup hook.
+
+**Multi-combo orders write multiple rows.** A cart checkout with N combos
+writes N rows, all sharing the same `timestamp`+`name`+`phone` (that's how a
+Stage 3 importer groups them back into one order — they map one-to-one onto
+an `orders` + `order_line_items` relational schema). Each row's own
+`base_name`/`pizza_name`/`topping_name`/`qty`/`subtotal` is that COMBO's;
+`discount`/`gst`/`final_total` are ORDER-level and are repeated identically
+on every row of that order — don't `SUM()` those three across rows when
+querying, only `subtotal`.
 
 ## Design notes
 
