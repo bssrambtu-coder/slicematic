@@ -12,11 +12,13 @@ src/
   core.py         PURE logic: validators + pricing/GST/discount.
                   NO Gradio, NO file I/O, NO input()/print(). Fully implemented & tested.
   menu.py         Defensive parser for the 3 menu .txt files. Does file I/O.  Fully implemented & tested.
-  persistence.py  Appends completed orders to orders_log.txt.        [skeleton]
-  app.py          THIN Gradio UI. Calls core/menu/persistence only.  [skeleton]
+  persistence.py  Appends completed orders to orders_log.txt.        Fully implemented & tested.
+  app.py          THIN Gradio UI. Calls core/menu/persistence only.  Fully implemented & tested.
 tests/
-  test_core.py    Full edge-case harness (the 8 graded cases + pricing). GREEN.
-  test_menu.py    Full parser test suite (malformed lines, missing files, swap test). GREEN.
+  test_core.py        Full edge-case harness (the 8 graded cases + pricing). GREEN.
+  test_menu.py        Full parser test suite (malformed lines, missing files, swap test). GREEN.
+  test_persistence.py Log read/write tests + phone-lookup hook. GREEN.
+  test_app.py          place_order orchestration + helper tests. GREEN.
 data/             The 3 swappable menu files (ID;Name;Price).
 ```
 
@@ -24,15 +26,12 @@ data/             The 3 swappable menu files (ID;Name;Price).
 must never re-derive validation, discount, or GST. The Stage 3 LLM agent will
 call the same `core` validators and `core.price_order` with plain arguments.
 
-## Module ownership (parallel build)
-
-- `persistence.py` — backend teammate. Still a skeleton.
-- `app.py` — frontend teammate. Still a skeleton.
-- `core.py` + `test_core.py` and `menu.py` + `test_menu.py` — shared
-  foundation; both fully implemented and tested. Treat `core`'s function
-  signatures and `Result`/`Bill` shapes, and `menu`'s `MenuItem`/
-  `load_all_menus`/`MenuFileError` shapes, as stable APIs — coordinate before
-  changing them.
+All four modules are now fully implemented and tested (117 tests passing),
+and the app has been smoke-tested end-to-end against the real `data/` files —
+golden path and all 8 PRD edge cases verified live via `gradio_client` against
+a running server. Treat `core`'s `Result`/`Bill` shapes, `menu`'s `MenuItem`/
+`load_all_menus`/`MenuFileError`, and `persistence`'s `LOG_FIELDS`/
+`OrderLogError` as stable APIs — coordinate before changing them.
 
 ## Hard rules from the PRD (the grader enforces these)
 

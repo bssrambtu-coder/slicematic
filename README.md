@@ -33,11 +33,16 @@ Requires Python 3.11+.
 |------|---------|--------|
 | `src/core.py` | Pure validators + pricing/GST/discount engine | ✅ implemented + tested |
 | `src/menu.py` | Defensive `ID;Name;Price` file parser | ✅ implemented + tested |
-| `src/persistence.py` | Append orders to `orders_log.txt` | 🚧 skeleton |
-| `src/app.py` | Thin Gradio UI | 🚧 skeleton |
+| `src/persistence.py` | Append orders to `orders_log.txt` | ✅ implemented + tested |
+| `src/app.py` | Thin Gradio UI | ✅ implemented + tested |
 | `tests/test_core.py` | Edge-case harness (8 graded cases + pricing) | ✅ green |
 | `tests/test_menu.py` | Parser test suite | ✅ green |
+| `tests/test_persistence.py` | Order log read/write + phone lookup | ✅ green |
+| `tests/test_app.py` | UI orchestration logic | ✅ green |
 | `data/*.txt` | Swappable menu files | ✅ sample data |
+
+The app has been smoke-tested end-to-end: golden path and all 8 PRD edge
+cases verified against a live `python app.py` server.
 
 ## Menu data format
 
