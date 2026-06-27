@@ -11,12 +11,12 @@ that possible.
 src/
   core.py         PURE logic: validators + pricing/GST/discount.
                   NO Gradio, NO file I/O, NO input()/print(). Fully implemented & tested.
-  menu.py         Defensive parser for the 3 menu .txt files. Does file I/O. [skeleton]
+  menu.py         Defensive parser for the 3 menu .txt files. Does file I/O.  Fully implemented & tested.
   persistence.py  Appends completed orders to orders_log.txt.        [skeleton]
   app.py          THIN Gradio UI. Calls core/menu/persistence only.  [skeleton]
 tests/
   test_core.py    Full edge-case harness (the 8 graded cases + pricing). GREEN.
-  test_menu.py    Parser test signatures (skip stubs). GREEN until implemented.
+  test_menu.py    Full parser test suite (malformed lines, missing files, swap test). GREEN.
 data/             The 3 swappable menu files (ID;Name;Price).
 ```
 
@@ -26,12 +26,13 @@ call the same `core` validators and `core.price_order` with plain arguments.
 
 ## Module ownership (parallel build)
 
-- `menu.py` + `test_menu.py` — data-model teammate
-- `persistence.py` — backend teammate
-- `app.py` — frontend teammate
-- `core.py` + `test_core.py` — shared contract; already implemented. Treat its
-  function signatures and `Result`/`Bill` shapes as a stable API — coordinate
-  before changing them.
+- `persistence.py` — backend teammate. Still a skeleton.
+- `app.py` — frontend teammate. Still a skeleton.
+- `core.py` + `test_core.py` and `menu.py` + `test_menu.py` — shared
+  foundation; both fully implemented and tested. Treat `core`'s function
+  signatures and `Result`/`Bill` shapes, and `menu`'s `MenuItem`/
+  `load_all_menus`/`MenuFileError` shapes, as stable APIs — coordinate before
+  changing them.
 
 ## Hard rules from the PRD (the grader enforces these)
 

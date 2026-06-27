@@ -32,11 +32,11 @@ Requires Python 3.11+.
 | Path | Purpose | Status |
 |------|---------|--------|
 | `src/core.py` | Pure validators + pricing/GST/discount engine | ✅ implemented + tested |
-| `src/menu.py` | Defensive `ID;Name;Price` file parser | 🚧 skeleton |
+| `src/menu.py` | Defensive `ID;Name;Price` file parser | ✅ implemented + tested |
 | `src/persistence.py` | Append orders to `orders_log.txt` | 🚧 skeleton |
 | `src/app.py` | Thin Gradio UI | 🚧 skeleton |
 | `tests/test_core.py` | Edge-case harness (8 graded cases + pricing) | ✅ green |
-| `tests/test_menu.py` | Parser test stubs | 🚧 skip stubs |
+| `tests/test_menu.py` | Parser test suite | ✅ green |
 | `data/*.txt` | Swappable menu files | ✅ sample data |
 
 ## Menu data format
