@@ -85,8 +85,27 @@ def _item_by_id(category: str, item_id: Optional[str]) -> Optional[menu.MenuItem
     return None
 
 
-def _radio_choices_for(category: str):
-    """Build (choices, label_to_id, sold_out_names) from live quota state.
+def _reserved_in_cart(state: dict, category: str, item_id: Optional[str]) -> int:
+    """Units of `item_id` already committed to OTHER combos in this same
+    (unpaid) cart. Quota itself is only consumed at checkout (submit_payment),
+    so without this, ordering the same near-sold-out item across two combos
+    in one session would pass each combo's availability check independently
+    and silently oversell it."""
+    if not item_id:
+        return 0
+    key = f"{category}_id"
+    return sum(line["qty"] for line in state["cart"] if line.get(key) == item_id)
+
+
+def _effective_remaining(state: dict, category: str, item_id: str) -> int:
+    """Today's quota remaining for item_id, net of what this cart already
+    reserves for it (but hasn't been paid for / consumed from quota yet)."""
+    return _QUOTA.remaining(item_id) - _reserved_in_cart(state, category, item_id)
+
+
+def _radio_choices_for(category: str, state: dict):
+    """Build (choices, label_to_id, sold_out_names) from live quota state,
+    net of this cart's own in-progress reservations (_effective_remaining).
 
     Used for base/pizza (gr.Radio, single pick) and toppings (gr.CheckboxGroup,
     multi pick) alike — both widgets take the same flat choices list. Sold-out
@@ -100,7 +119,7 @@ def _radio_choices_for(category: str):
     label_to_id: Dict[str, str] = {}
     sold_out_names: List[str] = []
     for item in items:
-        if _QUOTA.is_available(item.item_id):
+        if _effective_remaining(state, category, item.item_id) > 0:
             label = f"{item.name} — {core.format_money(item.price)}"
             choices.append(label)
             label_to_id[label] = item.item_id
@@ -269,9 +288,9 @@ def render(state: dict, error: Optional[str] = None) -> list:
     def vis(name: str):
         return gr.update(visible=(step == name))
 
-    base_choices, base_label_to_id, base_sold_out = _radio_choices_for("base")
-    pizza_choices, pizza_label_to_id, pizza_sold_out = _radio_choices_for("pizza")
-    topping_choices, topping_label_to_id, topping_sold_out = _radio_choices_for("topping")
+    base_choices, base_label_to_id, base_sold_out = _radio_choices_for("base", state)
+    pizza_choices, pizza_label_to_id, pizza_sold_out = _radio_choices_for("pizza", state)
+    topping_choices, topping_label_to_id, topping_sold_out = _radio_choices_for("topping", state)
 
     cart_html_value = _cart_html(state) if step == "cart" else ""
     bill_html_value = _bill_html(state) if step in ("bill", "payment", "confirmation") else ""
@@ -323,11 +342,11 @@ def submit_phone(state: dict, value: str):
 
 
 def submit_base(state: dict, radio_value: Optional[str]):
-    _, label_to_id, _sold_out = _radio_choices_for("base")
+    _, label_to_id, _sold_out = _radio_choices_for("base", state)
     item_id = label_to_id.get(radio_value) if radio_value else None
     if item_id is None:
         return [state, *render(state, error="Choose a base from the list.")]
-    if not _QUOTA.is_available(item_id):
+    if _effective_remaining(state, "base", item_id) <= 0:
         return [state, *render(state, error="That base just sold out — please choose another.")]
     state["base_id"] = item_id
     state["step"] = "pizza"
@@ -335,11 +354,11 @@ def submit_base(state: dict, radio_value: Optional[str]):
 
 
 def submit_pizza(state: dict, radio_value: Optional[str]):
-    _, label_to_id, _sold_out = _radio_choices_for("pizza")
+    _, label_to_id, _sold_out = _radio_choices_for("pizza", state)
     item_id = label_to_id.get(radio_value) if radio_value else None
     if item_id is None:
         return [state, *render(state, error="Choose a pizza from the list.")]
-    if not _QUOTA.is_available(item_id):
+    if _effective_remaining(state, "pizza", item_id) <= 0:
         return [state, *render(state, error="That pizza just sold out — please choose another.")]
     state["pizza_id"] = item_id
     state["step"] = "topping"
@@ -347,14 +366,14 @@ def submit_pizza(state: dict, radio_value: Optional[str]):
 
 
 def submit_topping(state: dict, selected_labels: Optional[List[str]]):
-    _, label_to_id, _sold_out = _radio_choices_for("topping")
+    _, label_to_id, _sold_out = _radio_choices_for("topping", state)
     selected_labels = selected_labels or []
     topping_ids = [label_to_id[v] for v in selected_labels if v in label_to_id]
 
     res = core.validate_toppings_selection(topping_ids)
     if not res.ok:
         return [state, *render(state, error=res.message)]
-    if any(not _QUOTA.is_available(tid) for tid in topping_ids):
+    if any(_effective_remaining(state, "topping", tid) <= 0 for tid in topping_ids):
         return [state, *render(state, error="One of those toppings just sold out — please reselect.")]
 
     state["topping_ids"] = topping_ids
@@ -371,18 +390,61 @@ def skip_toppings(state: dict):
 
 
 def submit_qty(state: dict, value):
-    """Validate quantity, commit the in-progress combo as a new cart line,
-    then clear the in-progress fields so the next combo starts fresh."""
+    """Validate quantity against (a) this single combo's 1-10 range, (b) the
+    whole ORDER's 10-pizza cap across every combo already in the cart, and
+    (c) each chosen item's actual remaining stock net of what the cart has
+    already reserved for it — then commit the combo as a new cart line and
+    clear the in-progress fields so the next combo starts fresh."""
     res = core.validate_quantity(value)
     if not res.ok:
         return [state, *render(state, error=res.message)]
+    qty = res.value
+
+    existing_total = sum(line["qty"] for line in state["cart"])
+    cart_cap_res = core.validate_cart_total_quantity(existing_total, qty)
+    if not cart_cap_res.ok:
+        return [state, *render(state, error=cart_cap_res.message)]
+
+    base_item = _item_by_id("base", state["base_id"])
+    base_remaining = _effective_remaining(state, "base", state["base_id"])
+    if not core.validate_item_stock(qty, base_remaining).ok:
+        return [
+            state,
+            *render(
+                state,
+                error=f"Only {base_remaining} left of {base_item.name} today — reduce quantity or choose a different base.",
+            ),
+        ]
+
+    pizza_item = _item_by_id("pizza", state["pizza_id"])
+    pizza_remaining = _effective_remaining(state, "pizza", state["pizza_id"])
+    if not core.validate_item_stock(qty, pizza_remaining).ok:
+        return [
+            state,
+            *render(
+                state,
+                error=f"Only {pizza_remaining} left of {pizza_item.name} today — reduce quantity or choose a different pizza.",
+            ),
+        ]
+
+    for tid in state["topping_ids"]:
+        topping_remaining = _effective_remaining(state, "topping", tid)
+        if not core.validate_item_stock(qty, topping_remaining).ok:
+            topping_item = _item_by_id("topping", tid)
+            return [
+                state,
+                *render(
+                    state,
+                    error=f"Only {topping_remaining} left of {topping_item.name} today — reduce quantity or remove it.",
+                ),
+            ]
 
     state["cart"].append(
         {
             "base_id": state["base_id"],
             "pizza_id": state["pizza_id"],
             "topping_ids": list(state["topping_ids"]),
-            "qty": res.value,
+            "qty": qty,
         }
     )
     state["base_id"] = None
@@ -463,11 +525,12 @@ def submit_payment(state: dict, choice: Optional[str]):
     except persistence.OrderLogError as exc:
         return [state, *render(state, error=f"Order was priced but could not be saved: {exc}")]
 
-    # Decrement base/pizza stock for every combo; toppings are effectively
+    # Decrement base/pizza stock by each combo's QUANTITY (ordering qty=10
+    # consumes 10 units, not 1 per combo); toppings are effectively
     # unlimited (999) so they're never consumed.
     for line in state["cart"]:
-        _QUOTA.consume(line["base_id"])
-        _QUOTA.consume(line["pizza_id"])
+        _QUOTA.consume(line["base_id"], count=line["qty"])
+        _QUOTA.consume(line["pizza_id"], count=line["qty"])
 
     state["confirmation_html"] = _confirmation_html(state, res.message)
     state["step"] = "confirmation"

@@ -121,6 +121,56 @@ class TestValidateQuantity:
 
 
 # --------------------------------------------------------------------------- #
+# Cart-wide order quantity cap (PRD FR-2: outlet capacity is per ORDER, not
+# per combo, once an order can hold multiple combos).
+# --------------------------------------------------------------------------- #
+class TestValidateCartTotalQuantity:
+    def test_within_cap_accepted(self):
+        res = core.validate_cart_total_quantity(existing_total=4, additional_qty=3)
+        assert res.ok is True
+        assert res.value == 7
+
+    def test_exactly_at_cap_accepted(self):
+        res = core.validate_cart_total_quantity(existing_total=4, additional_qty=core.MAX_QTY - 4)
+        assert res.ok is True
+        assert res.value == core.MAX_QTY
+
+    def test_over_cap_rejected_even_if_each_combo_individually_valid(self):
+        # 6 + 6 = 12 > MAX_QTY(10), though 6 alone is a valid single-combo qty.
+        res = core.validate_cart_total_quantity(existing_total=6, additional_qty=6)
+        assert res.ok is False
+        assert res.value is None
+        assert res.message
+
+    def test_first_combo_at_max_alone_is_fine(self):
+        res = core.validate_cart_total_quantity(existing_total=0, additional_qty=core.MAX_QTY)
+        assert res.ok is True
+
+
+# --------------------------------------------------------------------------- #
+# Per-item stock check (net of what this same order already reserved).
+# --------------------------------------------------------------------------- #
+class TestValidateItemStock:
+    def test_within_stock_accepted(self):
+        res = core.validate_item_stock(requested_qty=5, remaining_stock=10)
+        assert res.ok is True
+        assert res.value == 5
+
+    def test_exactly_remaining_accepted(self):
+        res = core.validate_item_stock(requested_qty=10, remaining_stock=10)
+        assert res.ok is True
+
+    def test_exceeds_remaining_rejected(self):
+        res = core.validate_item_stock(requested_qty=6, remaining_stock=4)
+        assert res.ok is False
+        assert res.value is None
+        assert res.message
+
+    def test_zero_remaining_rejects_any_positive_request(self):
+        assert core.validate_item_stock(requested_qty=1, remaining_stock=0).ok is False
+
+
+# --------------------------------------------------------------------------- #
 # Menu selection (PRD FR-3 / edge cases 4, 5, 6)
 # --------------------------------------------------------------------------- #
 class TestValidateMenuSelection:

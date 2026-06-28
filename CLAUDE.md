@@ -44,12 +44,27 @@ compatibility and still fully tested; `app.py` exclusively uses
 `core.price_cart`/`core.CartBill` now that every order is cart-shaped (even a
 one-combo order is just a one-line cart).
 
-All modules are fully implemented and tested (134 tests passing), and the app
+**Order-wide quantity cap + per-item stock (across combos in one cart):**
+`core.validate_cart_total_quantity(existing_total, additional_qty)` enforces
+the outlet's `MAX_QTY` cap on the ORDER's combined quantity (every combo
+summed), not any single combo. `core.validate_item_stock(requested_qty,
+remaining_stock)` is a generic "does this fit what's left" check; `app.py`
+calls it with `remaining_stock` computed net of whatever this SAME unpaid
+cart already reserves for that item (`_effective_remaining`/
+`_reserved_in_cart`), since quota itself isn't decremented until checkout —
+without that, ordering the same near-sold-out item across two combos in one
+order would pass each combo's check independently and oversell it.
+`quota.QuotaManager.consume(item_id, count=1)` now takes `count` — checkout
+must consume `count=line["qty"]`, not the default 1, or stock drops by
+"number of combos" instead of "units sold".
+
+All modules are fully implemented and tested (144 tests passing), and the app
 has been smoke-tested end-to-end with a real Playwright-driven browser — golden
 path, the golden-bill dataset to the paisa, a multi-combo cart where the
 order-level discount triggers on combined quantity even though no single
 combo reached the threshold, "no toppings" via Skip, Back/Start-Over
-preserving prior input, and sold-out filtering. Treat `core`'s
+preserving prior input, sold-out filtering, the order-wide quantity cap, and
+per-item stock awareness across combos in one order. Treat `core`'s
 `Result`/`Bill`/`CartBill`/`CartLineBill` shapes, `menu`'s `MenuItem`/
 `load_all_menus`/`MenuFileError`, `persistence`'s `LOG_FIELDS`/
 `OrderLogError`, and `quota`'s `QuotaManager`/`QuotaConfigError` as stable

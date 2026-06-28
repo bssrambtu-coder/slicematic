@@ -231,6 +231,47 @@ def validate_quantity(qty: Any) -> Result:
     return Result(True, "Quantity accepted.", n)
 
 
+def validate_cart_total_quantity(existing_total: int, additional_qty: int) -> Result:
+    """Validate that adding one more combo won't exceed the per-ORDER cap.
+
+    MAX_QTY is the outlet's capacity per order (PRD FR-2) — with a multi-combo
+    cart, that cap applies to the SUM of quantities across every combo in the
+    order, not any single combo (a single combo is already capped 1-10 by
+    validate_quantity). E.g. 6 of one combo + 6 of another (12 total) must be
+    rejected even though each combo alone is within 1-10.
+
+    Returns Result(ok, message, value=new_total).
+    """
+    new_total = existing_total + additional_qty
+    if new_total > MAX_QTY:
+        remaining = max(0, MAX_QTY - existing_total)
+        return Result(
+            False,
+            f"Adding {additional_qty} would bring this order to {new_total}, "
+            f"over the {MAX_QTY}-pizza limit per order. You can add up to {remaining} more.",
+            None,
+        )
+    return Result(True, "Within order capacity.", new_total)
+
+
+def validate_item_stock(requested_qty: int, remaining_stock: int) -> Result:
+    """Validate that `requested_qty` does not exceed `remaining_stock` for a
+    single quota-limited item (the caller computes `remaining_stock` net of
+    whatever this same in-progress order has already reserved, so ordering
+    the same sold-out-prone item across multiple combos in one order can't
+    silently exceed what's actually left for the day).
+
+    Returns Result(ok, message, value=requested_qty).
+    """
+    if requested_qty > remaining_stock:
+        return Result(
+            False,
+            f"Only {remaining_stock} left of that item today; reduce the quantity or choose something else.",
+            None,
+        )
+    return Result(True, "Within stock.", requested_qty)
+
+
 def validate_menu_selection(selection: Any, item_count: int) -> Result:
     """Validate a 1-based menu pick against the number of loaded items.
 

@@ -103,11 +103,14 @@ class QuotaManager:
         with self._lock:
             return dict(self._remaining)
 
-    def consume(self, item_id: str) -> None:
-        """Decrement remaining stock for item_id by 1 (floor at 0; no-op if untracked)."""
+    def consume(self, item_id: str, count: int = 1) -> None:
+        """Decrement remaining stock for item_id by `count` units sold (one
+        order line ordering qty=10 of an item consumes 10 units, not 1).
+        Floors at 0; no-op if untracked."""
         with self._lock:
-            if self._remaining.get(item_id, 0) > 0:
-                self._remaining[item_id] -= 1
+            current = self._remaining.get(item_id, 0)
+            if current > 0:
+                self._remaining[item_id] = max(0, current - count)
 
     def check_and_reset_if_new_day(self, *, now: Optional[datetime] = None) -> bool:
         """Reset all counts if the IST calendar date has rolled over.

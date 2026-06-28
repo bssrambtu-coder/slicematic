@@ -89,6 +89,17 @@ This is single-process, in-memory state, which is fine for demonstrating
 sold-out behavior in one Gradio process; Stage 3 replaces it with Supabase
 realtime so kitchen stock stays consistent across multiple app instances.
 
+Quota is consumed **proportional to quantity** at checkout (`QuotaManager.
+consume(item_id, count=qty)`), not once per combo — ordering qty=10 of a
+pizza decrements its stock by 10, not 1. While a cart is still being built
+(before checkout), each combo's availability/stock check is computed net of
+whatever the SAME unpaid cart has already reserved for that item
+(`_effective_remaining` in `app.py`), so ordering the same near-sold-out item
+across two different combos in one order can't oversell it just because
+quota itself hasn't been decremented yet. Separately, the outlet's 10-pizza
+cap (`core.MAX_QTY`) applies to the whole ORDER's combined quantity across
+every combo (`core.validate_cart_total_quantity`), not any single combo.
+
 ## Stage 3 direction
 
 - A web app (not a mobile app) on **Vercel**, backed by **Supabase** for

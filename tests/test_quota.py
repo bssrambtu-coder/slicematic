@@ -59,6 +59,18 @@ class TestConsume:
             qm.consume("B1")
         assert qm.remaining("B1") == 0
 
+    def test_consume_decrements_by_count_for_multi_unit_orders(self):
+        # An order line with qty=2 must consume 2 units, not 1 (the bug:
+        # consuming once per ORDER regardless of quantity sold).
+        qm = quota.QuotaManager(_config(), today=date(2026, 6, 29))  # B1 quota 2
+        qm.consume("B1", count=2)
+        assert qm.remaining("B1") == 0
+
+    def test_consume_count_floors_at_zero_even_if_count_exceeds_remaining(self):
+        qm = quota.QuotaManager(_config(), today=date(2026, 6, 29))  # B1 quota 2
+        qm.consume("B1", count=5)
+        assert qm.remaining("B1") == 0
+
     def test_effectively_unlimited_topping_survives_many_consumes(self):
         qm = quota.QuotaManager(_config(), today=date(2026, 6, 29))
         for _ in range(50):
