@@ -62,6 +62,7 @@ def fresh_state() -> dict:
         "step": "name",
         "name": None,
         "phone": None,
+        "session_started_at": None,
         "base_id": None,
         "pizza_id": None,
         "topping_ids": [],
@@ -377,6 +378,11 @@ def submit_name(state: dict, value: str):
     if not res.ok:
         return [state, *render(state, error=res.message)]
     state["name"] = res.value
+    # "Log the timestamp of each new session" (PRD FR-1) means session START,
+    # not payment completion — capture it once here and reuse it at checkout
+    # rather than recomputing a fresh (later) timestamp in submit_payment.
+    if state["session_started_at"] is None:
+        state["session_started_at"] = _session_timestamp()
     state["step"] = "phone"
     return [state, *render(state)]
 
@@ -536,7 +542,10 @@ def submit_payment(state: dict, choice: Optional[str]):
     state["payment_mode"] = res.value
 
     cart_bill = _cart_bill(state)
-    timestamp = _session_timestamp()
+    # Use the timestamp captured when this session began (submit_name), not
+    # a fresh one — "log the timestamp of each new session" means session
+    # start, not whenever the customer happens to finish paying.
+    timestamp = state["session_started_at"]
 
     # orders_log.txt keeps its fixed 15-column shape (Stage 3 importer maps
     # this one-to-one onto "orders + order_line_items"): one row per cart
