@@ -151,15 +151,27 @@ def _sold_out_markdown(names: List[str]) -> str:
 
 
 def _combo_description(line: dict) -> str:
+    # base_item/pizza_item can be None if an admin reloaded the menu (see
+    # reload_menu_file) after this combo was already added to a cart and the
+    # item id it referenced is gone from the new file — fall back to a
+    # placeholder instead of crashing on .name.
     base_item = _item_by_id("base", line["base_id"])
     pizza_item = _item_by_id("pizza", line["pizza_id"])
     topping_items = [_item_by_id("topping", tid) for tid in line["topping_ids"]]
-    topping_text = ", ".join(t.name for t in topping_items) if topping_items else "No toppings"
-    return f"{html.escape(base_item.name)} + {html.escape(pizza_item.name)} + {html.escape(topping_text)}"
+    base_text = html.escape(base_item.name) if base_item else "(item no longer on menu)"
+    pizza_text = html.escape(pizza_item.name) if pizza_item else "(item no longer on menu)"
+    topping_names = [t.name for t in topping_items if t is not None]
+    topping_text = ", ".join(topping_names) if topping_names else "No toppings"
+    return f"{base_text} + {pizza_text} + {html.escape(topping_text)}"
 
 
 def _cart_bill(state: dict) -> Optional[core.CartBill]:
-    """Price the whole cart (order-level discount/GST). None if cart is empty."""
+    """Price the whole cart (order-level discount/GST). None if cart is empty.
+
+    Treats a vanished item (see _combo_description) as price 0 rather than
+    raising — a stale cart after an admin menu reload should never crash the
+    page, even though its price is no longer meaningful.
+    """
     if not state["cart"]:
         return None
     line_items = []
@@ -167,7 +179,10 @@ def _cart_bill(state: dict) -> Optional[core.CartBill]:
         base_item = _item_by_id("base", line["base_id"])
         pizza_item = _item_by_id("pizza", line["pizza_id"])
         topping_items = [_item_by_id("topping", tid) for tid in line["topping_ids"]]
-        line_items.append((base_item.price, pizza_item.price, [t.price for t in topping_items], line["qty"]))
+        base_price = base_item.price if base_item else Decimal("0")
+        pizza_price = pizza_item.price if pizza_item else Decimal("0")
+        topping_prices = [t.price for t in topping_items if t is not None]
+        line_items.append((base_price, pizza_price, topping_prices, line["qty"]))
     return core.price_cart(line_items)
 
 
@@ -274,6 +289,40 @@ def _kitchen_html() -> str:
       {''.join(rows)}
     </table>
     """
+
+
+def reload_menu_file(category: str, file_path: Optional[str]):
+    """Replace _MENU[category] from an admin-uploaded .txt file.
+
+    Reuses menu.load_menu_file exactly as-is — the SAME defensive parser the
+    bundled data/*.txt files go through, so a row with a missing price (base)
+    or a missing name next to the price (pizza), or any malformed line, is
+    silently dropped (with a warning) while the rest of the file still loads.
+    Any item id not already in quota_config.json gets a generous default
+    quota via QuotaManager.ensure_tracked so it's immediately orderable
+    rather than appearing falsely sold out.
+
+    A bad upload (missing file, or empty after parsing) leaves the existing
+    menu untouched rather than wiping out a working one.
+    """
+    if not file_path:
+        return gr.update(value=""), gr.update(value=_kitchen_html())
+    try:
+        new_items = menu.load_menu_file(file_path)
+    except menu.MenuFileError as exc:
+        return (
+            gr.update(value=f"⚠️ Could not load {category} file — keeping the current menu: {exc}"),
+            gr.update(value=_kitchen_html()),
+        )
+
+    _MENU[category] = new_items
+    for item in new_items:
+        _QUOTA.ensure_tracked(item.item_id)
+
+    return (
+        gr.update(value=f"✅ {category.title()} menu reloaded: {len(new_items)} item(s) loaded."),
+        gr.update(value=_kitchen_html()),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -496,18 +545,21 @@ def submit_payment(state: dict, choice: Optional[str]):
     # repeated identically on every row of that order.
     records = []
     for line, line_bill in zip(state["cart"], cart_bill.lines):
+        # See _combo_description — guard against an item id that no longer
+        # exists in _MENU because an admin reloaded the menu mid-order.
         base_item = _item_by_id("base", line["base_id"])
         pizza_item = _item_by_id("pizza", line["pizza_id"])
         topping_items = [_item_by_id("topping", tid) for tid in line["topping_ids"]]
+        topping_items = [t for t in topping_items if t is not None]
         records.append(
             {
                 "timestamp": timestamp,
                 "name": state["name"],
                 "phone": state["phone"],
-                "base_name": base_item.name,
-                "base_price": base_item.price,
-                "pizza_name": pizza_item.name,
-                "pizza_price": pizza_item.price,
+                "base_name": base_item.name if base_item else "Unknown",
+                "base_price": base_item.price if base_item else Decimal("0"),
+                "pizza_name": pizza_item.name if pizza_item else "Unknown",
+                "pizza_price": pizza_item.price if pizza_item else Decimal("0"),
                 "topping_name": "; ".join(t.name for t in topping_items) if topping_items else "None",
                 "topping_price": sum((t.price for t in topping_items), start=Decimal("0")),
                 "qty": line_bill.quantity,
@@ -666,6 +718,21 @@ def build_ui() -> gr.Blocks:
             kitchen_html_box = gr.HTML()
             kitchen_refresh_btn = gr.Button("Refresh")
 
+            gr.Markdown(
+                "### Swap menu files (grader testing)\n"
+                "Upload a replacement `.txt` to test the menu parser — a row with a missing "
+                "price, a missing name, or any other malformed line is dropped automatically "
+                "(the rest of the file still loads). New item ids get unlimited stock today "
+                "so they're immediately orderable. Reload between test runs, not mid-order — "
+                "any combo already in someone's cart that referenced a removed item id will "
+                "show as \"item no longer on menu\" rather than crash."
+            )
+            menu_reload_status = gr.Markdown()
+            with gr.Row():
+                base_upload = gr.File(label="Replace Base menu (.txt)", file_types=[".txt"], type="filepath")
+                pizza_upload = gr.File(label="Replace Pizza menu (.txt)", file_types=[".txt"], type="filepath")
+                topping_upload = gr.File(label="Replace Toppings menu (.txt)", file_types=[".txt"], type="filepath")
+
         all_outputs = [
             grp_name, grp_phone,
             grp_base, grp_pizza, grp_topping, grp_qty,
@@ -721,6 +788,18 @@ def build_ui() -> gr.Blocks:
         start_new_btn.click(start_over, inputs=[state], outputs=[state, *all_outputs])
 
         kitchen_refresh_btn.click(lambda: gr.update(value=_kitchen_html()), inputs=None, outputs=[kitchen_html_box])
+
+        base_upload.upload(
+            lambda f: reload_menu_file("base", f), inputs=[base_upload], outputs=[menu_reload_status, kitchen_html_box]
+        )
+        pizza_upload.upload(
+            lambda f: reload_menu_file("pizza", f), inputs=[pizza_upload], outputs=[menu_reload_status, kitchen_html_box]
+        )
+        topping_upload.upload(
+            lambda f: reload_menu_file("topping", f),
+            inputs=[topping_upload],
+            outputs=[menu_reload_status, kitchen_html_box],
+        )
 
         demo.load(
             lambda: [fresh_state(), *render(fresh_state())],

@@ -58,7 +58,18 @@ order would pass each combo's check independently and oversell it.
 must consume `count=line["qty"]`, not the default 1, or stock drops by
 "number of combos" instead of "units sold".
 
-All modules are fully implemented and tested (144 tests passing), and the app
+**Live menu reload (Kitchen Admin tab):** `app.reload_menu_file(category,
+file_path)` calls `menu.load_menu_file` UNCHANGED on an admin-uploaded file —
+the same defensive parsing (drop malformed lines, skip empty-after-parse)
+applies to swapped files as to the bundled ones. New item ids get
+`quota.QuotaManager.ensure_tracked(item_id)` so they default to available
+(999) instead of silently "unavailable" (untracked == 0 remaining
+everywhere else in QuotaManager). `_combo_description`/`_cart_bill`/
+`submit_payment` all guard against `_item_by_id` returning None for a cart
+line whose item id no longer exists post-reload — never crash, just render
+a placeholder.
+
+All modules are fully implemented and tested (149 tests passing), and the app
 has been smoke-tested end-to-end with a real Playwright-driven browser — golden
 path, the golden-bill dataset to the paisa, a multi-combo cart where the
 order-level discount triggers on combined quantity even though no single

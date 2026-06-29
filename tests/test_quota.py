@@ -78,6 +78,39 @@ class TestConsume:
         assert qm.is_available("T1") is True
 
 
+class TestEnsureTracked:
+    def test_unconfigured_item_defaults_to_unavailable(self):
+        # Baseline: without ensure_tracked, an untracked id is unavailable.
+        qm = quota.QuotaManager(_config(), today=date(2026, 6, 29))
+        assert qm.is_available("NEW1") is False
+
+    def test_ensure_tracked_makes_new_item_available(self):
+        qm = quota.QuotaManager(_config(), today=date(2026, 6, 29))
+        qm.ensure_tracked("NEW1")
+        assert qm.is_available("NEW1") is True
+        assert qm.remaining("NEW1") == 999
+
+    def test_ensure_tracked_is_a_noop_for_already_configured_item(self):
+        qm = quota.QuotaManager(_config(), today=date(2026, 6, 29))  # B1 quota 2
+        qm.ensure_tracked("B1")
+        assert qm.remaining("B1") == 2  # untouched, not reset to 999
+
+    def test_ensure_tracked_survives_midnight_reset(self):
+        qm = quota.QuotaManager(_config(), today=date(2026, 6, 29))
+        qm.ensure_tracked("NEW1")
+        qm.consume("NEW1", count=500)
+        assert qm.remaining("NEW1") == 499
+
+        next_day = datetime(2026, 6, 30, 0, 0, 1, tzinfo=IST)
+        qm.check_and_reset_if_new_day(now=next_day)
+        assert qm.remaining("NEW1") == 999  # re-derived from _config, not lost
+
+    def test_ensure_tracked_uses_weekend_default_on_weekend(self):
+        qm = quota.QuotaManager(_config(), today=date(2026, 6, 27))  # Saturday
+        qm.ensure_tracked("NEW1", default_weekday=10, default_weekend=20)
+        assert qm.remaining("NEW1") == 20
+
+
 class TestWeekendQuota:
     def test_weekend_quota_higher_than_weekday(self):
         weekday_qm = quota.QuotaManager(_config(), today=date(2026, 6, 29))  # Monday

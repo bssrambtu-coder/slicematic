@@ -103,6 +103,29 @@ class QuotaManager:
         with self._lock:
             return dict(self._remaining)
 
+    def ensure_tracked(self, item_id: str, *, default_weekday: int = 999, default_weekend: int = 999) -> None:
+        """Make sure item_id has a tracked quota, defaulting to a generous
+        (999/999, effectively unlimited) allowance if it isn't already
+        configured. Without this, an item introduced by a freshly
+        uploaded/swapped menu file (not present in quota_config.json) would
+        silently default to "unavailable" (remaining=0) — untracked means
+        unavailable everywhere else in this class — rather than orderable.
+        The default is also written into _config (not just _remaining) so a
+        later midnight reset doesn't drop it back to untracked.
+        """
+        with self._lock:
+            for category in self._config.values():
+                if item_id in category:
+                    return  # already configured; leave whatever quota it has
+            self._config.setdefault("_dynamic", {})[item_id] = {
+                "name": item_id,
+                "weekday": default_weekday,
+                "weekend": default_weekend,
+            }
+            self._remaining[item_id] = (
+                default_weekend if _is_weekend(self._current_date) else default_weekday
+            )
+
     def consume(self, item_id: str, count: int = 1) -> None:
         """Decrement remaining stock for item_id by `count` units sold (one
         order line ordering qty=10 of an item consumes 10 units, not 1).

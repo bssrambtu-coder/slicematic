@@ -125,6 +125,19 @@ T1;Black Olives;49
 **Nothing about the menu is hardcoded** — the parser reads these at runtime, and
 the files can be swapped without touching code.
 
+**Testing a swapped file without restarting the server:** the Kitchen
+(Admin) tab has an upload control per category (Base/Pizza/Toppings). The
+uploaded file goes through the exact same defensive parser as the bundled
+files — a row missing its price, or missing its name next to the price, or
+any other malformed line, is dropped (with a warning) while the rest of the
+file still loads. New item ids not already in `quota_config.json` get a
+generous default quota (999) via `QuotaManager.ensure_tracked` so they're
+immediately orderable rather than appearing falsely sold out. A bad upload
+(missing/unreadable file, or empty after parsing) leaves the existing menu
+untouched. Reload between test runs, not mid-order — a cart combo that
+referenced an item id removed by the new file shows "item no longer on
+menu" rather than crashing, but its price is no longer meaningful.
+
 ## Order log format
 
 Pipe-separated, one order block per record, blank line between blocks. Field
